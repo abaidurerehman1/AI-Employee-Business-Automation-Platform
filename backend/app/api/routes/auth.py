@@ -159,9 +159,7 @@ async def resend_verification(
     db: DbSession,
     background_tasks: BackgroundTasks,
 ) -> MessageResponse:
-    user = await db.scalar(
-        select(User).where(User.email == normalize_email(str(payload.email)))
-    )
+    user = await db.scalar(select(User).where(User.email == normalize_email(str(payload.email))))
     if user and user.is_active and not user.is_email_verified:
         token = await create_email_token(
             db, user.id, TokenPurpose.verify_email, timedelta(hours=24)

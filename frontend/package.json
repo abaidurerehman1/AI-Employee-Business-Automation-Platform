@@ -11,6 +11,7 @@
     "lint": "node ./node_modules/eslint/bin/eslint.js .",
     "preview": "node ./node_modules/vite/bin/vite.js preview",
     "test": "node ./node_modules/vitest/vitest.mjs run"
+    ,"test:e2e": "node ./node_modules/@playwright/test/cli.js test"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@eslint/js": "latest",
+    "@playwright/test": "^1.64.1",
     "@testing-library/jest-dom": "latest",
     "@testing-library/react": "latest",
     "@types/node": "latest",

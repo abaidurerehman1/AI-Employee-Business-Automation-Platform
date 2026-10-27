@@ -5,7 +5,8 @@ import {
   useEffect,
   useState,
 } from "react";
-import { api, type Member, type Role, type Session } from "./api/client";
+import { api, type Session } from "./api/client";
+import { ApplicationShell } from "./components/ApplicationShell";
 
 function navigate(path: string) {
   window.history.pushState({}, "", path);
@@ -378,136 +379,6 @@ function AcceptInvitation({ session }: { session: Session | null }) {
   );
 }
 
-function Dashboard({
-  session,
-  setSession,
-}: {
-  session: Session;
-  setSession: (value: Session | null) => void;
-}) {
-  const [organizationId, setOrganizationId] = useState(
-    session.organizations[0]?.id ?? "",
-  );
-  const [members, setMembers] = useState<Member[]>([]);
-  const [error, setError] = useState("");
-  const organization = session.organizations.find(
-    (item) => item.id === organizationId,
-  );
-  useEffect(() => {
-    if (organizationId)
-      api
-        .members(organizationId)
-        .then(setMembers)
-        .catch((reason: Error) => setError(reason.message));
-  }, [organizationId]);
-  async function invite(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError("");
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    try {
-      await api.invite(
-        organizationId,
-        session,
-        String(form.get("email")),
-        String(form.get("role")) as Role,
-      );
-      formElement.reset();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to invite");
-    }
-  }
-  async function logout() {
-    try {
-      await api.logout(session);
-    } finally {
-      setSession(null);
-      navigate("/login");
-    }
-  }
-  return (
-    <main className="dashboard">
-      <header>
-        <Brand />
-        <div className="profile">
-          <span>{session.user.full_name}</span>
-          <button className="secondary" onClick={logout}>
-            Sign out
-          </button>
-        </div>
-      </header>
-      <div className="workspace">
-        <aside className="sidebar">
-          <p className="nav-label">Workspace</p>
-          <button className="nav-active">People & access</button>
-          <div className="org-picker">
-            <label>Organization</label>
-            <select
-              value={organizationId}
-              onChange={(event) => setOrganizationId(event.target.value)}
-            >
-              {session.organizations.map((org) => (
-                <option value={org.id} key={org.id}>
-                  {org.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </aside>
-        <section className="content">
-          <p className="eyebrow">Identity & access</p>
-          <div className="page-heading">
-            <div>
-              <h1>{organization?.name}</h1>
-              <p>Manage your organization’s people, roles, and invitations.</p>
-            </div>
-            <span className="role-badge">{organization?.role}</span>
-          </div>
-          <Status error={error} />
-          {(organization?.role === "admin" ||
-            organization?.role === "manager") && (
-            <form className="invite-bar" onSubmit={invite}>
-              <Field
-                label="Invite by email"
-                name="email"
-                type="email"
-                required
-              />
-              <label className="field">
-                <span>Role</span>
-                <select name="role">
-                  <option value="employee">Employee</option>
-                  <option value="manager">Manager</option>
-                  {organization.role === "admin" && (
-                    <option value="admin">Admin</option>
-                  )}
-                </select>
-              </label>
-              <button className="primary">Send invitation</button>
-            </form>
-          )}
-          <div className="member-card">
-            <div className="table-title">
-              <h2>Members</h2>
-              <span>{members.length} people</span>
-            </div>
-            {members.map((member) => (
-              <div className="member" key={member.id}>
-                <span className="avatar">{member.full_name.charAt(0)}</span>
-                <div>
-                  <strong>{member.full_name}</strong>
-                  <small>{member.email}</small>
-                </div>
-                <span className="role-badge">{member.role}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-    </main>
-  );
-}
-
 function App() {
   const path = usePath();
   const [session, setSession] = useState<Session | null>(null);
@@ -534,8 +405,20 @@ function App() {
   if (path === "/accept-invitation")
     return <AcceptInvitation session={session} />;
   if (path === "/app" && session)
-    return <Dashboard session={session} setSession={setSession} />;
+    return (
+      <ApplicationShell
+        session={session}
+        setSession={setSession}
+        navigate={navigate}
+      />
+    );
   if (path === "/login" || !session) return <Login onLogin={setSession} />;
-  return <Dashboard session={session} setSession={setSession} />;
+  return (
+    <ApplicationShell
+      session={session}
+      setSession={setSession}
+      navigate={navigate}
+    />
+  );
 }
 export default App;

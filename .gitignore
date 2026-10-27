@@ -16,6 +16,8 @@ venv/
 # Node
 node_modules/
 frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
 *.tsbuildinfo
 
 # Editors and OS

@@ -74,6 +74,16 @@ describe("authentication UI", () => {
         .mockResolvedValueOnce({
           ok: true,
           status: 200,
+          json: async () => ({
+            member_count: 1,
+            pending_invitation_count: 0,
+            activity: [],
+            notifications: [],
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
           json: async () => [
             {
               id: "u1",
@@ -94,8 +104,11 @@ describe("authentication UI", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: "Acme" })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("heading", { name: "Workspace overview" }),
+      ).toBeInTheDocument(),
     );
+    fireEvent.click(screen.getByRole("button", { name: /People & access/ }));
     expect(await screen.findByText("owner@example.com")).toBeInTheDocument();
   });
 });

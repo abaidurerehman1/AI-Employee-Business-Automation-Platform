@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from_email: str = ""
     emails_enabled: bool = False
+    openai_api_key: str = ""
+    openai_default_model: str = "gpt-4.1-mini"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
