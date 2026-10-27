@@ -96,7 +96,12 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
           String(form.get("password")),
         ),
       );
-      navigate("/app");
+      const returnPath = new URLSearchParams(window.location.search).get("next");
+      navigate(
+        returnPath?.startsWith("/accept-invitation?token=")
+          ? returnPath
+          : "/app",
+      );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to sign in");
     } finally {
@@ -352,7 +357,10 @@ function AcceptInvitation({ session }: { session: Session | null }) {
   const [error, setError] = useState("");
   const token = new URLSearchParams(window.location.search).get("token") ?? "";
   async function accept() {
-    if (!session) return navigate("/login");
+    if (!session) {
+      const invitationPath = `/accept-invitation?token=${encodeURIComponent(token)}`;
+      return navigate(`/login?next=${encodeURIComponent(invitationPath)}`);
+    }
     try {
       setMessage((await api.acceptInvitation(session, token)).message);
     } catch (reason) {

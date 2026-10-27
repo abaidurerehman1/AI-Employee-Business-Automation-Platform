@@ -10,9 +10,12 @@ import {
 import { Button, Dialog, State, Table } from "./ui";
 import { Icon } from "./Icons";
 import { Agents } from "./Agents";
+import { Knowledge } from "./Knowledge";
+import { CRM } from "./CRM";
+import { Inbound } from "./Inbound";
 import "./shell.css";
 
-type View = "overview" | "people" | "notifications" | "agents";
+type View = "overview" | "people" | "notifications" | "agents" | "knowledge" | "crm" | "inbound";
 type Load<T> =
   | { state: "loading" }
   | { state: "error"; message: string }
@@ -93,6 +96,22 @@ export function ApplicationShell({
       active = false;
     };
   }, [organizationId, refresh]);
+
+  useEffect(() => {
+    const refreshVisibleWorkspace = () => {
+      if (document.visibilityState === "visible") {
+        setRefresh((value) => value + 1);
+      }
+    };
+    const interval = window.setInterval(refreshVisibleWorkspace, 15_000);
+    window.addEventListener("focus", refreshVisibleWorkspace);
+    document.addEventListener("visibilitychange", refreshVisibleWorkspace);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshVisibleWorkspace);
+      document.removeEventListener("visibilitychange", refreshVisibleWorkspace);
+    };
+  }, []);
 
   function changeOrganization(id: string) {
     setDashboard({ state: "loading" });
@@ -241,6 +260,15 @@ export function ApplicationShell({
             >
               <Icon name="bell" /> Notifications
             </button>
+            <button className={view === "crm" ? "selected" : ""} aria-current={view === "crm" ? "page" : undefined} onClick={() => selectView("crm")}><Icon name="users" /> CRM</button>
+            <button className={view === "inbound" ? "selected" : ""} aria-current={view === "inbound" ? "page" : undefined} onClick={() => selectView("inbound")}><Icon name="mail" /> Inbound chat</button>
+            <button
+              className={view === "knowledge" ? "selected" : ""}
+              aria-current={view === "knowledge" ? "page" : undefined}
+              onClick={() => selectView("knowledge")}
+            >
+              <Icon name="mail" /> Knowledge base
+            </button>
           </nav>
           <div className="sidebar-footer">
             <span>Current workspace</span>
@@ -260,20 +288,24 @@ export function ApplicationShell({
               <h1>
                 {view === "overview"
                   ? "Workspace overview"
-                  : view === "agents"
-                    ? "AI employees"
-                    : view === "people"
-                      ? "People & access"
-                      : "Notifications"}
+                  : view === "inbound" ? "Inbound chat" : view === "crm" ? "Customer relationships" : view === "knowledge"
+                    ? "Knowledge base"
+                    : view === "agents"
+                      ? "AI employees"
+                      : view === "people"
+                        ? "People & access"
+                        : "Notifications"}
               </h1>
               <p>
                 {view === "overview"
                   ? "A clear view of your organization’s activity."
-                  : view === "agents"
-                    ? "Configure and test your AI workforce."
-                    : view === "people"
-                      ? "Manage the people in your workspace."
-                      : "Updates that need your attention."}
+                  : view === "inbound" ? "Connect your website and help visitors." : view === "crm" ? "Manage your contacts, leads and deals." : view === "knowledge"
+                    ? "Manage the information your AI employees can use."
+                    : view === "agents"
+                      ? "Configure and test your AI workforce."
+                      : view === "people"
+                        ? "Manage the people in your workspace."
+                        : "Updates that need your attention."}
               </p>
             </div>
             {canInvite && (view === "overview" || view === "people") && (
@@ -415,6 +447,16 @@ export function ApplicationShell({
               )}
               {view === "agents" && (
                 <Agents
+                  key={organizationId}
+                  organizationId={organizationId}
+                  session={session}
+                  canManage={!!canInvite}
+                />
+              )}
+              {view === "crm" && <CRM key={organizationId} organizationId={organizationId} session={session} canManage={canInvite} members={members.state === "ready" ? members.data : []} />}
+              {view === "inbound" && <Inbound key={organizationId} organizationId={organizationId} session={session} canManage={canInvite} members={members.state === "ready" ? members.data : []} />}
+              {view === "knowledge" && (
+                <Knowledge
                   key={organizationId}
                   organizationId={organizationId}
                   session={session}

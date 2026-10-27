@@ -89,6 +89,25 @@ test("an admin can create and test an agent tool", async ({ page }) => {
   await expect(page.getByText(/completed/)).toBeVisible();
 });
 
+for (const width of [320, 1440]) {
+  test(`CRM remains usable at ${width}px`, async ({ page }) => {
+    await page.route("**/api/v1/crm/**", async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith("/leads")) return route.fulfill({ json: { items: [{ id: "lead-1", title: "Website enquiry", stage: "qualified", owner_id: null, created_at: "2026-10-27T00:00:00Z" }], total: 1 } });
+      if (path.endsWith("/activities")) return route.fulfill({ json: [] });
+      return route.fulfill({ json: { items: [], total: 0 } });
+    });
+    await page.setViewportSize({ width, height: 800 });
+    await page.goto("/app");
+    if (width < 800) await page.getByRole("button", { name: "Toggle navigation" }).click();
+    await page.getByRole("button", { name: "CRM", exact: true }).click();
+    await expect(page.getByText("Website enquiry")).toBeVisible();
+    await page.getByRole("button", { name: "Details" }).click();
+    await expect(page.getByText("RECORD DETAILS")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+}
+
 test("approving a model tool request updates its conversation", async ({ page }) => {
   let requested = false;
   let approved = false;

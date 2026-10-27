@@ -1,10 +1,13 @@
+import re
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from hashlib import sha256
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.dependencies import (
     DbSession,
@@ -13,13 +16,24 @@ from app.api.dependencies import (
     require_csrf,
     require_roles,
 )
-from app.core.agent_tools import TOOL_REGISTRY, execute_tool
+from app.core.agent_tools import CRM_WRITE_TOOLS, TOOL_REGISTRY, ToolInputError, validate_tool_arguments
+import json
 from app.core.config import settings
+from app.core.embeddings import EmbeddingError
 from app.core.openai_client import ProviderError, generate_response
+from app.core.rag_graph import run_rag_agent
+from app.core.temporal_client import (
+    TemporalUnavailable,
+    signal_tool_workflow,
+    start_tool_workflow,
+    wait_tool_workflow,
+)
 from app.models.agent import Agent, AgentConversation, AgentMessage, AgentToolRequest, AgentVersion
 from app.models.auth import MembershipRole, User
+from app.models.knowledge import KnowledgeDocument
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+logger = logging.getLogger(__name__)
 ManagerContext = Annotated[
     TenantContext, Depends(require_roles(MembershipRole.admin, MembershipRole.manager))
 ]
@@ -34,7 +48,7 @@ class AgentConfig(BaseModel):
     tone: str = Field(default="Professional", min_length=1, max_length=80)
     language: str = Field(default="English", min_length=1, max_length=80)
     model: str = Field(default="gpt-4.1-mini", pattern=r"^[a-zA-Z0-9._-]{1,100}$")
-    tools: list[str] = Field(default_factory=list, max_length=10)
+    tools: list[str] = Field(default_factory=list, max_length=20)
     approval_rules: dict[str, bool] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -74,10 +88,21 @@ class ChatRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
 
 
+class HandoffRequest(BaseModel):
+    target_agent_id: uuid.UUID
+
+
+class HandoffResponse(BaseModel):
+    agent_id: uuid.UUID
+    conversation_id: uuid.UUID
+    messages: list["MessageResponse"]
+
+
 class MessageResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     role: str
     content: str
+    citations: list[dict] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -94,16 +119,49 @@ class ConversationSummary(BaseModel):
 
 class ToolRequestInput(BaseModel):
     tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ToolRequestResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     tool_name: str
+    arguments: dict
     status: str
     result: str | None
+    error_message: str | None
+    attempt_count: int
+    workflow_id: str | None
     conversation_id: uuid.UUID | None
     created_at: datetime
+    updated_at: datetime
+
+
+async def launch_tool_workflow(
+    db: DbSession, request_id: uuid.UUID, workflow_id: str, requires_approval: bool,
+    *, resume_only: bool = False,
+) -> None:
+    request = await db.get(AgentToolRequest, request_id)
+    if not request:
+        return
+    try:
+        await start_tool_workflow(
+            workflow_id,
+            {
+                "request_id": str(request.id),
+                "tool_name": request.tool_name,
+                "arguments": request.arguments,
+                "requires_approval": requires_approval,
+                "resume_only": resume_only,
+                "resume_after_execution": bool(request.conversation_id and request.decided_by),
+            },
+        )
+    except TemporalUnavailable as exc:
+        request.status = "failed"
+        request.error_message = str(exc)
+        await db.commit()
+        raise
 
 
 async def get_agent(db: DbSession, context: TenantContext, agent_id: uuid.UUID) -> Agent:
@@ -139,7 +197,7 @@ async def serialize(db: DbSession, agent: Agent) -> AgentResponse:
 
 
 @router.get("/tools")
-async def list_tool_registry(_context: Tenant) -> list[dict[str, str]]:
+async def list_tool_registry(_context: Tenant) -> list[dict[str, Any]]:
     return list(TOOL_REGISTRY.values())
 
 
@@ -290,18 +348,92 @@ async def request_tool(
     version = await latest_version(db, agent.id)
     if payload.tool_name not in TOOL_REGISTRY or payload.tool_name not in version.tools:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Tool is not enabled for this version")
+    try:
+        arguments = validate_tool_arguments(payload.tool_name, json.dumps(payload.arguments))
+    except ToolInputError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     approval_required = version.approval_rules.get(payload.tool_name, True)
+    idempotency_key = payload.idempotency_key or uuid.uuid4().hex
+    idempotency_hash = sha256(
+        f"{context.organization.id}:{context.user.id}:{agent.id}:{payload.tool_name}:{idempotency_key}".encode()
+    ).hexdigest()
+    existing = await db.scalar(
+        select(AgentToolRequest).where(AgentToolRequest.idempotency_key == idempotency_hash)
+    )
+    if existing:
+        if existing.arguments != arguments:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Idempotency key was already used with different arguments")
+        return existing
+    request_id = uuid.uuid4()
+    workflow_id = f"agent-tool-{request_id}"
     tool_request = AgentToolRequest(
+        id=request_id,
         organization_id=context.organization.id,
         agent_id=agent.id,
         version_id=version.id,
         requested_by=context.user.id,
         tool_name=payload.tool_name,
-        status="pending" if approval_required else "completed",
-        result=None if approval_required else execute_tool(payload.tool_name),
+        arguments=arguments,
+        idempotency_key=idempotency_hash,
+        workflow_id=workflow_id,
+        status="pending" if approval_required else "queued",
     )
     db.add(tool_request)
     await db.commit()
+    await db.refresh(tool_request)
+    try:
+        await launch_tool_workflow(db, request_id, workflow_id, approval_required)
+    except TemporalUnavailable as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    if not approval_required:
+        try:
+            await wait_tool_workflow(workflow_id)
+        except TemporalUnavailable as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+        await db.refresh(tool_request)
+    return tool_request
+
+
+@router.post(
+    "/{agent_id}/tool-requests/{request_id}/retry", response_model=ToolRequestResponse
+)
+async def retry_tool_request(
+    agent_id: uuid.UUID,
+    request_id: uuid.UUID,
+    db: DbSession,
+    context: ManagerContext,
+    _user: CsrfUser,
+) -> AgentToolRequest:
+    await get_agent(db, context, agent_id)
+    tool_request = await db.scalar(
+        select(AgentToolRequest)
+        .where(
+            AgentToolRequest.id == request_id,
+            AgentToolRequest.agent_id == agent_id,
+            AgentToolRequest.organization_id == context.organization.id,
+        )
+        .with_for_update()
+    )
+    if not tool_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Tool request not found")
+    if tool_request.status not in {"failed", "resume_failed"}:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only failed workflows can be retried")
+    version = await db.get(AgentVersion, tool_request.version_id)
+    if not version or tool_request.tool_name not in version.tools:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Tool is no longer available")
+    resume_only = tool_request.status == "resume_failed" and tool_request.result is not None
+    requires_approval = version.approval_rules.get(tool_request.tool_name, True) and not tool_request.decided_by
+    tool_request.workflow_id = f"agent-tool-{request_id}-retry-{uuid.uuid4().hex}"
+    tool_request.status = "resume_failed" if resume_only else ("pending" if requires_approval else "queued")
+    tool_request.error_message = None
+    await db.commit()
+    try:
+        await launch_tool_workflow(
+            db, request_id, tool_request.workflow_id, requires_approval,
+            resume_only=resume_only,
+        )
+    except TemporalUnavailable as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     await db.refresh(tool_request)
     return tool_request
 
@@ -340,50 +472,19 @@ async def decide_tool_request(
         or tool_request.tool_name not in TOOL_REGISTRY
     ):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Tool is no longer available")
+    if not tool_request.workflow_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Tool request has no durable workflow")
     tool_request.decided_by = context.user.id
-    tool_request.status = "completed" if decision == "approve" else "rejected"
-    if decision == "approve":
-        tool_request.result = execute_tool(tool_request.tool_name)
-    if tool_request.conversation_id:
-        conversation = await db.scalar(
-            select(AgentConversation).where(
-                AgentConversation.id == tool_request.conversation_id,
-                AgentConversation.agent_id == agent_id,
-                AgentConversation.organization_id == context.organization.id,
-                AgentConversation.version_id == tool_request.version_id,
-            )
-        )
-        if not conversation:
-            raise HTTPException(status.HTTP_409_CONFLICT, "Original conversation is unavailable")
-        content = (
-            f"The current UTC time is {tool_request.result}."
-            if decision == "approve"
-            else "The time tool request was rejected, so I did not retrieve the current time."
-        )
-        latest_message = await db.scalar(
-            select(AgentMessage)
-            .where(AgentMessage.conversation_id == conversation.id)
-            .order_by(AgentMessage.created_at.desc(), AgentMessage.id.desc())
-            .limit(1)
-        )
-        created_at = datetime.now(UTC)
-        if latest_message:
-            last_time = latest_message.created_at
-            if last_time.tzinfo is None:
-                last_time = last_time.replace(tzinfo=UTC)
-            created_at = max(created_at, last_time + timedelta(microseconds=1))
-        db.add(
-            AgentMessage(
-                conversation_id=conversation.id,
-                role="assistant",
-                content=content,
-                created_at=created_at,
-            )
-        )
+    tool_request.decided_at = datetime.now(UTC)
+    tool_request.status = "approved" if decision == "approve" else "rejected"
     await db.commit()
+    try:
+        await signal_tool_workflow(tool_request.workflow_id, decision)
+    except TemporalUnavailable:
+        # The workflow may already have finished or will read the saved decision.
+        logger.warning("Workflow signal unavailable for request %s; decision saved", request_id)
     await db.refresh(tool_request)
     return tool_request
-
 
 async def run_chat(
     agent_id: uuid.UUID,
@@ -413,7 +514,7 @@ async def run_chat(
             select(AgentToolRequest.id)
             .where(
                 AgentToolRequest.conversation_id == conversation.id,
-                AgentToolRequest.status == "pending",
+            AgentToolRequest.status.in_({"pending", "approved", "queued", "running"}),
             )
             .limit(1)
         )
@@ -460,49 +561,119 @@ async def run_chat(
         f"Role: {version.role}\nTone: {version.tone}\n"
         f"Language: {version.language}\n\n{version.instructions}"
     )
+    ready_documents = await db.scalar(
+        select(func.count(KnowledgeDocument.id)).where(
+            KnowledgeDocument.organization_id == context.organization.id,
+            KnowledgeDocument.status == "ready",
+        )
+    )
+    sources = []
 
     handled_tools: dict[str, str] = {}
 
-    async def handle_tool(name: str) -> str:
-        if name in handled_tools:
-            return handled_tools[name]
+    async def handle_tool(name: str, arguments: dict[str, Any], call_id: str) -> str:
+        if call_id in handled_tools:
+            return handled_tools[call_id]
         if name not in TOOL_REGISTRY or name not in version.tools:
             raise ProviderError("Requested tool is not enabled")
+        if name in CRM_WRITE_TOOLS and context.membership.role not in {MembershipRole.admin, MembershipRole.manager}:
+            raise ProviderError("CRM changes require a manager or administrator")
         needs_approval = version.approval_rules.get(name, True)
-        result = None if needs_approval else execute_tool(name)
-        request = AgentToolRequest(
+        idempotency_hash = sha256(
+            f"{conversation.id}:{call_id or name}:{name}:{arguments}".encode()
+        ).hexdigest()
+        request = await db.scalar(
+            select(AgentToolRequest).where(
+                AgentToolRequest.idempotency_key == idempotency_hash
+            )
+        )
+        if request:
+            if request.status == "completed" and request.result is not None:
+                handled_tools[call_id] = request.result
+                return request.result
+            if request.workflow_id and needs_approval:
+                handled_tools[call_id] = (
+                    "Approval is required. The tool has not run; "
+                    "tell the user to use the Approve or Reject button."
+                )
+                return handled_tools[call_id]
+        request_id = request.id if request else uuid.uuid4()
+        workflow_id = f"agent-tool-{request_id}"
+        request = request or AgentToolRequest(
+            id=request_id,
             organization_id=context.organization.id,
             agent_id=agent.id,
             version_id=version.id,
             conversation_id=conversation.id,
             requested_by=context.user.id,
             tool_name=name,
-            status="pending" if needs_approval else "completed",
-            result=result,
+            arguments=arguments,
+            call_id=call_id,
+            idempotency_key=idempotency_hash,
+            workflow_id=workflow_id,
+            status="pending" if needs_approval else "queued",
         )
-        db.add(request)
-        await db.flush()
+        if not request.workflow_id:
+            request.workflow_id = workflow_id
+        if request not in db:
+            db.add(request)
+        await db.commit()
+        await launch_tool_workflow(db, request.id, request.workflow_id, needs_approval)
         if needs_approval:
-            handled_tools[name] = (
+            handled_tools[call_id] = (
                 "Approval is required. The tool has not run; "
                 "tell the user to use the Approve or Reject button."
             )
-        else:
-            handled_tools[name] = result or ""
-        return handled_tools[name]
+            return handled_tools[call_id]
+        try:
+            outcome = await wait_tool_workflow(request.workflow_id)
+        except TemporalUnavailable as exc:
+            raise ProviderError(str(exc)) from exc
+        result = outcome.get("result")
+        if not isinstance(result, str):
+            raise ProviderError("Tool workflow completed without a result")
+        handled_tools[call_id] = result
+        return result
 
     try:
-        answer = await generate_response(
-            version.model or settings.openai_default_model,
-            prompt,
-            inputs,
-            tool_names=version.tools,
-            tool_handler=handle_tool,
-        )
+        answer, sources = await run_rag_agent(
+                db=db,
+                organization_id=context.organization.id,
+                query=payload.message,
+                model=version.model or settings.openai_default_model,
+                prompt=prompt,
+                inputs=inputs,
+                tool_names=version.tools,
+                tool_handler=handle_tool,
+                use_knowledge=bool(ready_documents),
+            )
+    except EmbeddingError as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    except TemporalUnavailable as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     except ProviderError as exc:
         await db.rollback()
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     now = datetime.now(UTC)
+    cited_numbers = sorted(
+        {
+            int(number)
+            for number in re.findall(r"\[(\d+)\]", answer)
+            if 1 <= int(number) <= len(sources)
+        }
+    )
+    citations = [
+        {
+            "number": number,
+            "document_id": str(sources[number - 1].document_id),
+            "chunk_id": str(sources[number - 1].chunk_id),
+            "filename": sources[number - 1].filename,
+            "chunk_index": sources[number - 1].chunk_index,
+        }
+        for number in cited_numbers
+    ]
     db.add_all(
         [
             AgentMessage(
@@ -515,6 +686,7 @@ async def run_chat(
                 conversation_id=conversation.id,
                 role="assistant",
                 content=answer,
+                citations=citations,
                 created_at=now + timedelta(microseconds=1),
             ),
         ]
@@ -522,8 +694,11 @@ async def run_chat(
     await db.commit()
     return ChatResponse(
         conversation_id=conversation.id,
-        messages=[MessageResponse(role=entry["role"], content=entry["content"]) for entry in inputs]
-        + [MessageResponse(role="assistant", content=answer)],
+        messages=[MessageResponse.model_validate(item) for item in prior[-20:]]
+        + [
+            MessageResponse(role="user", content=payload.message),
+            MessageResponse(role="assistant", content=answer, citations=citations),
+        ],
     )
 
 
@@ -565,6 +740,63 @@ async def list_conversations(
         .limit(50)
     )
     return list(result.all())
+
+
+@router.post("/{agent_id}/conversations/{conversation_id}/handoff", response_model=HandoffResponse, status_code=201)
+async def handoff_conversation(
+    agent_id: uuid.UUID, conversation_id: uuid.UUID, payload: HandoffRequest,
+    db: DbSession, context: Tenant, _user: CsrfUser,
+) -> HandoffResponse:
+    source_agent = await get_agent(db, context, agent_id)
+    source = await db.scalar(
+        select(AgentConversation).where(
+            AgentConversation.id == conversation_id,
+            AgentConversation.agent_id == agent_id,
+            AgentConversation.organization_id == context.organization.id,
+            AgentConversation.user_id == context.user.id,
+        ).with_for_update()
+    )
+    if not source:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found")
+    if payload.target_agent_id == agent_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Choose another AI employee")
+    target = await get_agent(db, context, payload.target_agent_id)
+    if target.status != "published" or not target.published_version_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Target AI employee must be published")
+    version = await db.get(AgentVersion, target.published_version_id)
+    if not version or version.agent_id != target.id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Target version is unavailable")
+    pending = await db.scalar(select(AgentToolRequest.id).where(
+        AgentToolRequest.conversation_id == source.id,
+        AgentToolRequest.status.in_({"pending", "approved", "queued", "running", "resume_failed"}),
+    ).limit(1))
+    if pending:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Resolve the tool request before transferring")
+    previous = list((await db.scalars(select(AgentMessage).where(
+        AgentMessage.conversation_id == source.id
+    ).order_by(AgentMessage.created_at.desc(), AgentMessage.id.desc()).limit(20))).all())
+    previous.reverse()
+    target_conversation = AgentConversation(
+        organization_id=context.organization.id, agent_id=target.id,
+        version_id=version.id, user_id=context.user.id,
+    )
+    db.add(target_conversation)
+    await db.flush()
+    now = datetime.now(UTC)
+    copied = [AgentMessage(
+        conversation_id=target_conversation.id, role=message.role,
+        content=message.content, citations=message.citations or [],
+        created_at=now + timedelta(microseconds=index),
+    ) for index, message in enumerate(previous)]
+    note = AgentMessage(
+        conversation_id=target_conversation.id, role="assistant",
+        content=f"Conversation transferred from {source_agent.name} to {target.name} (source conversation: {source.id}).",
+        created_at=now + timedelta(microseconds=len(copied)),
+    )
+    db.add_all([*copied, note])
+    await db.commit()
+    return HandoffResponse(agent_id=target.id, conversation_id=target_conversation.id,
+                           messages=[MessageResponse.model_validate(item) for item in [*copied, note]])
 
 
 @router.get("/{agent_id}/conversations/{conversation_id}", response_model=ChatResponse)

@@ -61,6 +61,11 @@ def test_employee_cannot_see_invitation_notifications(client: TestClient) -> Non
     with patch("app.api.routes.organizations.send_invitation_email", new=AsyncMock()):
         client.cookies.clear()
         admin = login(client, "admin@example.com")
+        dashboard = client.get(
+            "/api/v1/dashboard", headers={"X-Organization-ID": org_id}
+        )
+        assert dashboard.json()["member_count"] == 2
+        assert dashboard.json()["pending_invitation_count"] == 0
         client.post(
             "/api/v1/organizations/current/invitations",
             headers={"X-Organization-ID": org_id, "X-CSRF-Token": admin["csrf_token"]},

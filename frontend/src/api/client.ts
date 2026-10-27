@@ -1,4 +1,9 @@
 export type Role = "admin" | "manager" | "employee";
+export type CRMRecord = { id: string; [key: string]: string | number | null };
+export type ImportRow = { row: number; status: string; data: Record<string, string | null>; error?: string };
+export interface InboundSite { id: string; name: string; agent_id: string; enabled: boolean; webhook_secret: string }
+export interface InboundConversation { id: string; name: string | null; email: string | null; status: string; assigned_to: string | null; lead_id: string | null; context: Record<string, string>; created_at: string }
+export interface InboundMessage { id: string; role: string; content: string; created_at: string }
 
 export interface User {
   id: string;
@@ -53,8 +58,10 @@ export interface AgentVersion extends Omit<AgentConfig, "name"> {
 export interface AgentToolRequest {
   id: string;
   tool_name: string;
+  arguments: Record<string, unknown>;
   status: string;
   result: string | null;
+  error_message: string | null;
   conversation_id: string | null;
   created_at: string;
 }
@@ -65,9 +72,23 @@ export interface Agent {
   published_version_id: string | null;
   latest_version: AgentVersion;
 }
+export interface Citation {
+  number: number;
+  document_id: string;
+  chunk_id: string;
+  filename: string;
+  chunk_index: number;
+}
 export interface AgentChat {
   conversation_id: string;
-  messages: { role: string; content: string }[];
+  messages: { role: string; content: string; citations?: Citation[] }[];
+}
+export interface KnowledgeDocument {
+  id: string;
+  filename: string;
+  status: string;
+  error_message: string | null;
+  chunk_count: number;
 }
 export interface AgentConversation {
   id: string;
@@ -84,7 +105,8 @@ async function request<T>(
   organizationId?: string,
 ): Promise<T> {
   const headers = new Headers(options.headers);
-  if (options.body) headers.set("Content-Type", "application/json");
+  if (options.body && !(options.body instanceof FormData))
+    headers.set("Content-Type", "application/json");
   if (session) headers.set("X-CSRF-Token", session.csrf_token);
   if (organizationId) headers.set("X-Organization-ID", organizationId);
   const response = await fetch(`${API_URL}${path}`, {
@@ -92,12 +114,27 @@ async function request<T>(
     headers,
     credentials: "include",
   });
-  const body = (await response.json().catch(() => ({}))) as { detail?: string };
-  if (!response.ok) throw new Error(body.detail ?? "Something went wrong");
+  const body = (await response.json().catch(() => ({}))) as { detail?: unknown };
+  if (!response.ok) {
+    const detail = typeof body.detail === "string" ? body.detail : Array.isArray(body.detail) ? body.detail.map((item) => item.msg ?? "Invalid input").join(", ") : "Something went wrong";
+    throw new Error(detail);
+  }
   return body as T;
 }
 
 export const api = {
+  inboundSite: (organizationId: string) => request<InboundSite | null>("/inbound/site", {}, undefined, organizationId),
+  saveInboundSite: (organizationId: string, session: Session, data: {name: string; agent_id: string; enabled: boolean}) => request<InboundSite>("/inbound/site", {method: "PUT", body: JSON.stringify(data)}, session, organizationId),
+  inboundConversations: (organizationId: string) => request<InboundConversation[]>("/inbound/conversations", {}, undefined, organizationId),
+  inboundConversation: (organizationId: string, id: string) => request<{status: string; assigned_to: string | null; context: Record<string, string>; messages: InboundMessage[]}>(`/inbound/conversations/${id}`, {}, undefined, organizationId),
+  inboundAssign: (organizationId: string, session: Session, id: string, assigned_to: string | null, status: string) => request(`/inbound/conversations/${id}/assign`, {method: "POST", body: JSON.stringify({assigned_to, status})}, session, organizationId),
+  inboundReply: (organizationId: string, session: Session, id: string, message: string) => request(`/inbound/conversations/${id}/reply`, {method: "POST", body: JSON.stringify({message})}, session, organizationId),
+  crmList: (organizationId: string, kind: string, query: string) => request<{ items: CRMRecord[]; total: number }>(`/crm/${kind}?${query}`, {}, undefined, organizationId),
+  crmSave: (organizationId: string, session: Session, kind: string, data: Record<string, unknown>, id?: string) => request<CRMRecord>(`/crm/${kind}${id ? `/${id}` : ""}`, { method: id ? "PUT" : "POST", body: JSON.stringify(data) }, session, organizationId),
+  crmActivities: (organizationId: string, id: string) => request<CRMRecord[]>(`/crm/leads/${id}/activities`, {}, undefined, organizationId),
+  crmAddActivity: (organizationId: string, session: Session, id: string, kind: string, content: string) => request<CRMRecord>(`/crm/leads/${id}/activities`, {method: "POST", body: JSON.stringify({kind, content})}, session, organizationId),
+  crmPreview: (organizationId: string, session: Session, file: File) => { const body = new FormData(); body.append("file", file); return request<{rows: ImportRow[]}>("/crm/imports/preview", {method: "POST", body}, session, organizationId); },
+  crmImport: (organizationId: string, session: Session, contacts: Record<string, unknown>[]) => request<{created: number; skipped: number}>("/crm/imports/contacts", {method: "POST", body: JSON.stringify({contacts})}, session, organizationId),
   register: (data: {
     email: string;
     full_name: string;
@@ -147,6 +184,37 @@ export const api = {
     request<DashboardData>("/dashboard", {}, undefined, organizationId),
   agents: (organizationId: string) =>
     request<Agent[]>("/agents", {}, undefined, organizationId),
+  documents: (organizationId: string) =>
+    request<KnowledgeDocument[]>(
+      "/knowledge/documents",
+      {},
+      undefined,
+      organizationId,
+    ),
+  uploadDocument: (organizationId: string, session: Session, file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request<KnowledgeDocument>(
+      "/knowledge/documents",
+      { method: "POST", body },
+      session,
+      organizationId,
+    );
+  },
+  deleteDocument: (organizationId: string, session: Session, id: string) =>
+    request<void>(
+      `/knowledge/documents/${id}`,
+      { method: "DELETE" },
+      session,
+      organizationId,
+    ),
+  retryDocument: (organizationId: string, session: Session, id: string) =>
+    request<KnowledgeDocument>(
+      `/knowledge/documents/${id}/retry`,
+      { method: "POST" },
+      session,
+      organizationId,
+    ),
   agentToolRequests: (organizationId: string, id: string) =>
     request<AgentToolRequest[]>(
       `/agents/${id}/tool-requests`,
@@ -179,6 +247,11 @@ export const api = {
       session,
       organizationId,
     ),
+  retryAgentTool: (organizationId: string, session: Session, id: string, requestId: string) =>
+    request<AgentToolRequest>(
+      `/agents/${id}/tool-requests/${requestId}/retry`,
+      { method: "POST" }, session, organizationId,
+    ),
   agentVersions: (organizationId: string, id: string) =>
     request<AgentVersion[]>(
       `/agents/${id}/versions`,
@@ -203,6 +276,12 @@ export const api = {
       {},
       undefined,
       organizationId,
+    ),
+  handoffConversation: (organizationId: string, session: Session, sourceAgentId: string, conversationId: string, targetAgentId: string) =>
+    request<AgentChat & { agent_id: string }>(
+      `/agents/${sourceAgentId}/conversations/${conversationId}/handoff`,
+      { method: "POST", body: JSON.stringify({ target_agent_id: targetAgentId }) },
+      session, organizationId,
     ),
   createAgent: (organizationId: string, session: Session, data: AgentConfig) =>
     request<Agent>(

@@ -1,0 +1,5 @@
+name,email,phone
+Sara Khan,sara.khan@example.com,+923001234567
+Ali Ahmed,ali.ahmed@example.com,+923009876543
+Sara Duplicate,SARA.KHAN@example.com,+923001234567
+Invalid Email,not-an-email,+923001112233

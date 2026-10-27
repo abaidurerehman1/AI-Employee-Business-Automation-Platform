@@ -112,3 +112,25 @@ npm run build
 - [x] Health endpoint and typed frontend API client
 - [x] Automated frontend/backend checks
 
+# Website support widget
+
+In **Inbound chat**, an administrator or manager selects a published AI employee,
+saves the widget, and copies the displayed embed snippet to a website. Visitors
+can chat, submit their contact details and qualification information, or request
+a person. The inbox lets managers assign a conversation and lets the assigned
+employee reply. Public chat does not have access to internal agent tools.
+
+For deployment, the widget's frontend and API URLs must be publicly reachable
+over HTTPS. Configure `VITE_API_URL` at frontend build time and include the widget
+frontend origin in backend `CORS_ORIGINS`; localhost URLs work only on the same
+computer. Public endpoint rate limiting requires Redis and uses the request peer
+address. A reverse proxy needs a trusted, correctly configured client-IP setup
+for per-visitor limits. Visitor tokens expire after seven days.
+
+The signed webhook accepts JSON with `event_id`, `name`, `email`, `enquiry`, and
+optional `budget` and `timeline`. Send `X-Timestamp` as Unix seconds and
+`X-Signature` as the lowercase hex HMAC-SHA256 of the exact bytes
+`timestamp + "." + request_body`, using the secret shown in widget settings.
+Requests older than five minutes are rejected; event IDs are deduplicated per site.
+Keep the webhook secret private. It is stored in the application database, so
+protect database access and backups accordingly.

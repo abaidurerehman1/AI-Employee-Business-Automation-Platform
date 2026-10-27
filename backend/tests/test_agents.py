@@ -7,6 +7,95 @@ from fastapi.testclient import TestClient
 from tests.test_auth import login, register_and_verify
 
 
+@pytest.mark.asyncio
+async def test_agent_input_and_tool_budgets():
+    from app.core.openai_client import ProviderError, generate_response
+
+    with patch("app.core.openai_client.settings.openai_api_key", "test"), patch(
+        "app.core.openai_client.settings.agent_max_input_characters", 10
+    ):
+        with pytest.raises(ProviderError, match="input budget"):
+            await generate_response("test", "instructions too long", [{"role": "user", "content": "hello"}])
+
+    response = MagicMock()
+    response.json.return_value = {"output": [
+        {"type": "function_call", "name": "get_current_utc_time", "arguments": "{}", "call_id": str(i)}
+        for i in range(4)
+    ]}
+    provider = AsyncMock()
+    provider.post.return_value = response
+    provider.__aenter__.return_value = provider
+    handler = AsyncMock()
+    with patch("app.core.openai_client.settings.openai_api_key", "test"), patch(
+        "app.core.openai_client.httpx.AsyncClient", return_value=provider
+    ):
+        with pytest.raises(ProviderError, match="budget"):
+            await generate_response("test", "help", [{"role": "user", "content": "time"}],
+                                    tool_names=["get_current_utc_time"], tool_handler=handler)
+    handler.assert_not_awaited()
+    assert provider.post.await_args.kwargs["json"]["max_output_tokens"] > 0
+
+
+def test_tool_schemas_validate_arguments() -> None:
+    from app.core.agent_tools import ToolInputError, get_tool_schemas, validate_tool_arguments
+
+    schema = get_tool_schemas(["get_current_utc_time"])[0]
+    assert schema["name"] == "get_current_utc_time"
+    assert schema["parameters"]["additionalProperties"] is False
+    assert validate_tool_arguments("get_current_utc_time", "{}") == {}
+    with pytest.raises(ToolInputError):
+        validate_tool_arguments("get_current_utc_time", '{"unexpected": true}')
+
+
+def test_handoff_copies_context_and_enforces_tenant(client: TestClient) -> None:
+    register_and_verify(client, "handoff@example.com", "First")
+    first = login(client, "handoff@example.com")
+    headers = {"X-Organization-ID": first["organizations"][0]["id"], "X-CSRF-Token": first["csrf_token"]}
+    config = {"name": "First agent", "role": "Sales", "instructions": "Help"}
+    source = client.post("/api/v1/agents", json=config, headers=headers).json()
+    target = client.post("/api/v1/agents", json={**config, "name": "Support"}, headers=headers).json()
+    client.post(f"/api/v1/agents/{source['id']}/publish", headers=headers)
+    client.post(f"/api/v1/agents/{target['id']}/publish", headers=headers)
+    with patch("app.core.rag_graph.generate_response", new=AsyncMock(return_value="Hello from sales")):
+        chat = client.post(f"/api/v1/agents/{source['id']}/chat", json={"message": "I need help"}, headers=headers)
+    assert chat.status_code == 200, chat.text
+    url = f"/api/v1/agents/{source['id']}/conversations/{chat.json()['conversation_id']}/handoff"
+    assert client.post(url, json={"target_agent_id": source["id"]}, headers=headers).status_code == 400
+    result = client.post(url, json={"target_agent_id": target["id"]}, headers=headers)
+    assert result.status_code == 201, result.text
+    assert result.json()["agent_id"] == target["id"]
+    assert [item["content"] for item in result.json()["messages"][:2]] == ["I need help", "Hello from sales"]
+    register_and_verify(client, "other-handoff@example.com", "Second")
+    other = login(client, "other-handoff@example.com")
+    other_headers = {"X-Organization-ID": other["organizations"][0]["id"], "X-CSRF-Token": other["csrf_token"]}
+    foreign = client.post("/api/v1/agents", json=config, headers=other_headers).json()
+    client.post(f"/api/v1/agents/{foreign['id']}/publish", headers=other_headers)
+    headers["X-CSRF-Token"] = login(client, "handoff@example.com")["csrf_token"]
+    assert client.post(url, json={"target_agent_id": foreign["id"]}, headers=headers).status_code == 404
+
+
+def test_failed_workflow_can_be_retried(client: TestClient) -> None:
+    from app.core.temporal_client import TemporalUnavailable
+    register_and_verify(client, "retry@example.com", "Team")
+    user = login(client, "retry@example.com")
+    headers = {"X-Organization-ID": user["organizations"][0]["id"], "X-CSRF-Token": user["csrf_token"]}
+    agent = client.post("/api/v1/agents", headers=headers, json={
+        "name": "Assistant", "role": "Helper", "instructions": "Help",
+        "tools": ["get_current_utc_time"], "approval_rules": {"get_current_utc_time": True},
+    }).json()
+    url = f"/api/v1/agents/{agent['id']}/tool-requests"
+    with patch("app.api.routes.agents.start_tool_workflow", new=AsyncMock(side_effect=TemporalUnavailable("offline"))):
+        response = client.post(url, headers=headers, json={"tool_name": "get_current_utc_time"})
+    assert response.status_code == 503
+    request = client.get(url, headers=headers).json()[0]
+    assert request["status"] == "failed"
+    with patch("app.api.routes.agents.start_tool_workflow", new=AsyncMock()) as start:
+        retried = client.post(f"{url}/{request['id']}/retry", headers=headers)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "pending"
+    assert start.await_args.args[1]["requires_approval"] is True
+
+
 @pytest.mark.skipif(os.getenv("RUN_LIVE_OPENAI") != "1", reason="Live OpenAI test is opt-in")
 def test_live_openai_playground(client: TestClient) -> None:
     register_and_verify(client, "live-test@example.com", "Test workspace")
@@ -99,7 +188,7 @@ def test_agent_versions_chat_and_tenant_isolation(client: TestClient) -> None:
         ).status_code
         == 409
     )
-    with patch("app.api.routes.agents.generate_response", new=AsyncMock(return_value="Hello!")):
+    with patch("app.core.rag_graph.generate_response", new=AsyncMock(return_value="Hello!")):
         chat = client.post(
             f"/api/v1/agents/{agent_id}/playground", json={"message": "Hi"}, headers=headers
         )
@@ -130,7 +219,7 @@ def test_agent_versions_chat_and_tenant_isolation(client: TestClient) -> None:
     versions = client.get(f"/api/v1/agents/{agent_id}/versions", headers=headers).json()
     assert [item["instructions"] for item in versions] == ["Updated", "Be helpful"]
     model = AsyncMock(return_value="Hello!")
-    with patch("app.api.routes.agents.generate_response", new=model):
+    with patch("app.core.rag_graph.generate_response", new=model):
         published_chat = client.post(
             f"/api/v1/agents/{agent_id}/chat", json={"message": "Hi"}, headers=headers
         )
@@ -182,21 +271,24 @@ def test_tools_require_permission_and_approval(client: TestClient) -> None:
         headers=headers,
     )
     assert rejected.status_code == 403
-    pending = client.post(
-        f"/api/v1/agents/{agent_id}/tool-requests",
-        json={"tool_name": "get_current_utc_time"},
-        headers=headers,
-    )
+    with patch("app.api.routes.agents.start_tool_workflow", new=AsyncMock()):
+        pending = client.post(
+            f"/api/v1/agents/{agent_id}/tool-requests",
+            json={"tool_name": "get_current_utc_time"},
+            headers=headers,
+        )
     assert pending.status_code == 201
     assert pending.json()["status"] == "pending"
     assert pending.json()["result"] is None
     request_id = pending.json()["id"]
-    approved = client.post(
-        f"/api/v1/agents/{agent_id}/tool-requests/{request_id}/approve",
-        headers=headers,
-    )
-    assert approved.json()["status"] == "completed"
-    assert approved.json()["result"] is not None
+    with patch("app.api.routes.agents.signal_tool_workflow", new=AsyncMock()) as signal:
+        approved = client.post(
+            f"/api/v1/agents/{agent_id}/tool-requests/{request_id}/approve",
+            headers=headers,
+        )
+    assert approved.json()["status"] == "approved"
+    assert approved.json()["result"] is None
+    signal.assert_awaited_once_with(pending.json()["workflow_id"], "approve")
     assert (
         client.post(
             f"/api/v1/agents/{agent_id}/tool-requests/{request_id}/approve",
@@ -251,6 +343,7 @@ def test_model_tool_call_creates_pending_approval(client: TestClient, decision: 
     with (
         patch("app.core.openai_client.settings.openai_api_key", "test-key"),
         patch("app.core.openai_client.httpx.AsyncClient", return_value=provider),
+        patch("app.api.routes.agents.start_tool_workflow", new=AsyncMock()) as start_workflow,
     ):
         response = client.post(
             f"/api/v1/agents/{agent['id']}/playground",
@@ -271,23 +364,25 @@ def test_model_tool_call_creates_pending_approval(client: TestClient, decision: 
         headers=headers,
     )
     assert blocked.status_code == 409
-    decided = client.post(
-        f"/api/v1/agents/{agent['id']}/tool-requests/{requests[0]['id']}/{decision}",
-        headers=headers,
-    )
+    with patch("app.api.routes.agents.signal_tool_workflow", new=AsyncMock()) as signal:
+        decided = client.post(
+            f"/api/v1/agents/{agent['id']}/tool-requests/{requests[0]['id']}/{decision}",
+            headers=headers,
+        )
     assert decided.status_code == 200
+    assert decided.json()["status"] == ("approved" if decision == "approve" else "rejected")
+    signal.assert_awaited_once_with(requests[0]["workflow_id"], decision)
+    start_workflow.assert_awaited_once()
     restored = client.get(
         f"/api/v1/agents/{agent['id']}/conversations/{conversation_id}",
         headers=headers,
     )
     if decision == "approve":
-        assert decided.json()["result"]
-        assert restored.json()["messages"][-1]["content"] == (
-            f"The current UTC time is {decided.json()['result']}."
-        )
+        assert decided.json()["result"] is None
+        assert restored.json()["messages"][-1]["content"] == "Please approve the request."
     else:
         assert decided.json()["result"] is None
-        assert "rejected" in restored.json()["messages"][-1]["content"]
+        assert restored.json()["messages"][-1]["content"] == "Please approve the request."
     assert (
         client.post(
             f"/api/v1/agents/{agent['id']}/tool-requests/{requests[0]['id']}/approve",

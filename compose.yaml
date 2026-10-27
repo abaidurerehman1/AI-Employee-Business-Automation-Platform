@@ -1,12 +1,12 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    build: ./postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ai_employee}
       POSTGRES_USER: ${POSTGRES_USER:-ai_employee}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_development_only}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -18,7 +18,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -28,6 +28,33 @@ services:
       timeout: 5s
       retries: 10
 
+  temporal:
+    image: temporalio/temporal:latest
+    # Docker-created local volumes are root-owned; the development server must
+    # be able to initialize its persistent SQLite database on first startup.
+    user: "0:0"
+    command:
+      [
+        "server",
+        "start-dev",
+        "--ip",
+        "0.0.0.0",
+        "--ui-ip",
+        "0.0.0.0",
+        "--db-filename",
+        "/var/lib/temporal/temporal.db",
+      ]
+    ports:
+      - "127.0.0.1:7233:7233"
+      - "127.0.0.1:8233:8233"
+    volumes:
+      - temporal_data:/var/lib/temporal
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   backend:
     build: ./backend
     env_file:
@@ -36,6 +63,7 @@ services:
       APP_ENV: development
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_employee}:${POSTGRES_PASSWORD:-local_development_only}@postgres:5432/${POSTGRES_DB:-ai_employee}
       REDIS_URL: redis://redis:6379/0
+      TEMPORAL_ADDRESS: temporal:7233
       CORS_ORIGINS: '["http://localhost:${FRONTEND_PORT:-5173}"]'
     ports:
       - "${BACKEND_PORT:-8000}:8000"
@@ -44,11 +72,44 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      temporal:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
       interval: 10s
       timeout: 5s
       retries: 10
+
+  worker:
+    build: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_employee}:${POSTGRES_PASSWORD:-local_development_only}@postgres:5432/${POSTGRES_DB:-ai_employee}
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_ADDRESS: temporal:7233
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  temporal-worker:
+    build: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_employee}:${POSTGRES_PASSWORD:-local_development_only}@postgres:5432/${POSTGRES_DB:-ai_employee}
+      TEMPORAL_ADDRESS: temporal:7233
+    command: ["python", "-m", "app.temporal_worker"]
+    depends_on:
+      backend:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
 
   frontend:
     build:
@@ -64,4 +125,5 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  temporal_data:
 

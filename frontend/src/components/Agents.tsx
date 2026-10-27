@@ -66,6 +66,26 @@ export function Agents({
       active = false;
     };
   }, [organizationId, refresh]);
+  useEffect(() => {
+    if (!playground) return;
+    let active = true;
+    const timer = window.setInterval(async () => {
+      try {
+        if (canManage) {
+          const requests = await api.agentToolRequests(organizationId, playground.id);
+          if (!active) return;
+          setToolRequests(requests);
+        }
+        if (chat?.conversation_id && !busy) {
+          const conversation = await api.agentConversation(organizationId, playground.id, chat.conversation_id);
+          if (active) setChat(conversation);
+        }
+      } catch {
+        // Keep the last known state; explicit actions report errors to the user.
+      }
+    }, 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [organizationId, playground, canManage, chat?.conversation_id, busy]);
   function openEditor(agent?: Agent) {
     setEditing(agent ?? null);
     setConfig(
@@ -207,6 +227,38 @@ export function Agents({
       setBusy(false);
     }
   }
+  async function retryTool(id: string) {
+    if (!playground) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.retryAgentTool(organizationId, session, playground.id, id);
+      setToolRequests(await api.agentToolRequests(organizationId, playground.id));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to retry tool request");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function handoff(targetId: string) {
+    if (!playground || !chat || !targetId) return;
+    const target = agents.find((agent) => agent.id === targetId);
+    if (!target) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.handoffConversation(organizationId, session, playground.id, chat.conversation_id, targetId);
+      setPlayground(target);
+      setChatMode("chat");
+      setChat(result);
+      setConversations(await api.agentConversations(organizationId, targetId));
+      setToolRequests(canManage ? await api.agentToolRequests(organizationId, targetId) : []);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to transfer conversation");
+    } finally {
+      setBusy(false);
+    }
+  }
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!playground) return;
@@ -251,7 +303,7 @@ export function Agents({
   }
   const pendingForConversation = toolRequests.some(
     (request) =>
-      request.status === "pending" &&
+      ["pending", "approved", "queued", "running", "resume_failed"].includes(request.status) &&
       request.conversation_id === chat?.conversation_id,
   );
   return (
@@ -369,10 +421,10 @@ export function Agents({
                 onChange={(event) =>
                   setConfig({
                     ...config,
-                    tools: event.target.checked ? ["get_current_utc_time"] : [],
+                    tools: event.target.checked ? [...config.tools, "get_current_utc_time"] : config.tools.filter((item) => item !== "get_current_utc_time"),
                     approval_rules: event.target.checked
-                      ? { get_current_utc_time: true }
-                      : {},
+                      ? { ...config.approval_rules, get_current_utc_time: true }
+                      : Object.fromEntries(Object.entries(config.approval_rules).filter(([key]) => key !== "get_current_utc_time")),
                   })
                 }
               />{" "}
@@ -387,6 +439,7 @@ export function Agents({
                     setConfig({
                       ...config,
                       approval_rules: {
+                        ...config.approval_rules,
                         get_current_utc_time: event.target.checked,
                       },
                     })
@@ -395,6 +448,43 @@ export function Agents({
                 Require approval
               </label>
             )}
+            <label>
+              <input type="checkbox" checked={config.tools.includes("search_crm_contacts")} onChange={(event) => setConfig({
+                ...config,
+                tools: event.target.checked ? [...config.tools, "search_crm_contacts"] : config.tools.filter((item) => item !== "search_crm_contacts"),
+                approval_rules: event.target.checked ? { ...config.approval_rules, search_crm_contacts: true } : Object.fromEntries(Object.entries(config.approval_rules).filter(([key]) => key !== "search_crm_contacts")),
+              })} /> Enable CRM contact search
+            </label>
+            {config.tools.includes("search_crm_contacts") && <label><input type="checkbox" checked={config.approval_rules.search_crm_contacts !== false} onChange={(event) => setConfig({ ...config, approval_rules: { ...config.approval_rules, search_crm_contacts: event.target.checked } })} /> Require approval for CRM search</label>}
+            <label><input type="checkbox" checked={config.tools.includes("search_crm_leads")} onChange={(event) => setConfig({
+              ...config, tools: event.target.checked ? [...config.tools, "search_crm_leads"] : config.tools.filter((item) => item !== "search_crm_leads"),
+              approval_rules: event.target.checked ? { ...config.approval_rules, search_crm_leads: true } : Object.fromEntries(Object.entries(config.approval_rules).filter(([key]) => key !== "search_crm_leads")),
+            })} /> Enable CRM lead search</label>
+            {config.tools.includes("search_crm_leads") && <label><input type="checkbox" checked={config.approval_rules.search_crm_leads !== false} onChange={(event) => setConfig({ ...config, approval_rules: { ...config.approval_rules, search_crm_leads: event.target.checked } })} /> Require approval for lead search</label>}
+            {([ ["search_crm_companies", "Search CRM companies"], ["search_crm_deals", "Search CRM deals"] ] as const).map(([name, label]) => <div key={name}>
+              <label><input type="checkbox" checked={config.tools.includes(name)} onChange={(event) => setConfig({ ...config,
+                tools: event.target.checked ? [...config.tools, name] : config.tools.filter((item) => item !== name),
+                approval_rules: event.target.checked ? { ...config.approval_rules, [name]: true } : Object.fromEntries(Object.entries(config.approval_rules).filter(([key]) => key !== name)),
+              })} /> {label}</label>
+              {config.tools.includes(name) && <label><input type="checkbox" checked={config.approval_rules[name] !== false} onChange={(event) => setConfig({ ...config, approval_rules: { ...config.approval_rules, [name]: event.target.checked } })} /> Require approval</label>}
+            </div>)}
+            {([
+              ["create_crm_contact", "Create CRM contacts"],
+              ["update_crm_contact", "Update CRM contacts"],
+              ["create_crm_lead", "Create CRM leads"],
+              ["update_crm_lead", "Update CRM leads"],
+              ["create_crm_company", "Create CRM companies"],
+              ["update_crm_company", "Update CRM companies"],
+              ["create_crm_deal", "Create CRM deals"],
+              ["update_crm_deal", "Update CRM deals"],
+            ] as const).map(([name, label]) => <div key={name}>
+              <label><input type="checkbox" checked={config.tools.includes(name)} onChange={(event) => setConfig({
+                ...config,
+                tools: event.target.checked ? [...config.tools, name] : config.tools.filter((item) => item !== name),
+                approval_rules: event.target.checked ? { ...config.approval_rules, [name]: true } : Object.fromEntries(Object.entries(config.approval_rules).filter(([key]) => key !== name)),
+              })} /> {label}</label>
+              {config.tools.includes(name) && <label><input type="checkbox" checked={config.approval_rules[name] !== false} onChange={(event) => setConfig({ ...config, approval_rules: { ...config.approval_rules, [name]: event.target.checked } })} /> Require approval</label>}
+            </div>)}
           </fieldset>
           {error && <State error>{error}</State>}
           <div className="dialog-actions">
@@ -446,8 +536,10 @@ export function Agents({
                   <span>
                     {item.tool_name}: {item.status}
                     {item.result && ` · ${item.result}`}
+                    {item.error_message && ` · ${item.error_message}`}
                     {!item.conversation_id && " · Standalone or older request"}
                   </span>
+                  {item.arguments && Object.keys(item.arguments).length > 0 && <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(item.arguments, null, 2)}</pre>}
                   {item.status === "pending" && (
                     <div className="agent-actions">
                       <Button
@@ -467,6 +559,11 @@ export function Agents({
                         Reject
                       </Button>
                     </div>
+                  )}
+                  {["failed", "resume_failed"].includes(item.status) && (
+                    <Button variant="secondary" type="button" disabled={busy} onClick={() => retryTool(item.id)}>
+                      Retry
+                    </Button>
                   )}
                 </div>
               ))}
@@ -511,11 +608,33 @@ export function Agents({
             </select>
           </label>
         )}
+        {chat && agents.some((agent) => agent.id !== playground?.id && agent.status === "published") && (
+          <label className="field">
+            <span>Transfer conversation to another AI employee</span>
+            <select value="" disabled={busy || pendingForConversation} onChange={(event) => void handoff(event.target.value)}>
+              <option value="">Choose an AI employee</option>
+              {agents.filter((agent) => agent.id !== playground?.id && agent.status === "published").map((agent) => (
+                <option key={agent.id} value={agent.id}>{agent.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <div className="agent-messages">
           {chat?.messages.map((item, index) => (
             <div className={`agent-message ${item.role}`} key={index}>
               <strong>{item.role === "user" ? "You" : "AI employee"}</strong>
               <p>{item.content}</p>
+              {item.citations && item.citations.length > 0 && (
+                <div className="message-citations">
+                  <strong>Sources</strong>
+                  {item.citations.map((source) => (
+                    <span key={source.chunk_id}>
+                      [{source.number}] {source.filename} · passage{" "}
+                      {source.chunk_index + 1}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )) ?? (
             <p>
