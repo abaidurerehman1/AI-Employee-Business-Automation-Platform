@@ -8,6 +8,11 @@ async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_o
 redis_client = Redis.from_url(settings.redis_url, decode_responses=True)
 
 
+async def get_db():
+    async with async_session_factory() as session:
+        yield session
+
+
 async def close_connections() -> None:
     await engine.dispose()
     await redis_client.aclose()

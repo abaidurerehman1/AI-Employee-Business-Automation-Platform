@@ -10,6 +10,16 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://ai_employee:change_me@localhost:5432/ai_employee"
     redis_url: str = "redis://localhost:6379/0"
     cors_origins: list[str] = ["http://localhost:5173"]
+    frontend_url: str = "http://localhost:5173"
+    session_cookie_name: str = "ai_employee_session"
+    session_days: int = 7
+    secure_cookies: bool = False
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    emails_enabled: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

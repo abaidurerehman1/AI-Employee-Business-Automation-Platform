@@ -30,6 +30,8 @@ services:
 
   backend:
     build: ./backend
+    env_file:
+      - ./backend/.env
     environment:
       APP_ENV: development
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_employee}:${POSTGRES_PASSWORD:-local_development_only}@postgres:5432/${POSTGRES_DB:-ai_employee}
