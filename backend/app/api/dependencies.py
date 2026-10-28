@@ -29,6 +29,7 @@ async def get_current_session(
             AuthSession.token_hash == token_digest(session_token),
             AuthSession.expires_at > datetime.now(UTC),
             User.is_active.is_(True),
+            User.is_email_verified.is_(True),
         )
     )
     result = row.first()
@@ -76,7 +77,11 @@ async def get_tenant_context(
     row = await db.execute(
         select(Organization, Membership)
         .join(Membership, Membership.organization_id == Organization.id)
-        .where(Organization.id == parsed_id, Membership.user_id == user.id)
+        .where(
+            Organization.id == parsed_id,
+            Membership.user_id == user.id,
+            Membership.is_active.is_(True),
+        )
     )
     result = row.first()
     if not result:
@@ -93,3 +98,14 @@ def require_roles(*roles: MembershipRole):
         return context
 
     return role_dependency
+
+
+def require_permission(permission: str):
+    from app.core.permissions import has_permission
+
+    async def permission_dependency(context: Annotated[TenantContext, Depends(get_tenant_context)]):
+        if not has_permission(context.membership.role, permission):
+            raise HTTPException(403, "Insufficient permissions")
+        return context
+
+    return permission_dependency

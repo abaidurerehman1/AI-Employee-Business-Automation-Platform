@@ -3,10 +3,13 @@ import {
   type InputHTMLAttributes,
   type ReactNode,
   useEffect,
+  useRef,
   useState,
 } from "react";
-import { api, type Session } from "./api/client";
+import { api, ApiError, type Session } from "./api/client";
 import { ApplicationShell } from "./components/ApplicationShell";
+import { Icon } from "./components/Icons";
+import { PasswordField } from "./components/Identity";
 
 function navigate(path: string) {
   window.history.pushState({}, "", path);
@@ -24,7 +27,9 @@ function usePath() {
 function Brand() {
   return (
     <button className="brand" onClick={() => navigate("/")} type="button">
-      <span className="brand-mark">A</span>
+      <span className="brand-mark">
+        <Icon name="sparkles" className="brand-icon" />
+      </span>
       <span>AI Employee</span>
     </button>
   );
@@ -50,7 +55,7 @@ function AuthShell({
             organization.
           </p>
         </div>
-        <p className="story-foot">Phase 2 · Identity & access</p>
+        <p className="story-foot">Your people. Your AI. One workspace.</p>
       </aside>
       <section className="auth-panel">
         <div className="auth-card">
@@ -66,6 +71,8 @@ function Field({
   label,
   ...props
 }: InputHTMLAttributes<HTMLInputElement> & { label: string }) {
+  if (props.type === "password")
+    return <PasswordField label={label} {...props} />;
   return (
     <label className="field">
       <span>{label}</span>
@@ -75,7 +82,10 @@ function Field({
 }
 function Status({ message, error }: { message?: string; error?: string }) {
   return message || error ? (
-    <div className={`notice ${error ? "notice-error" : ""}`}>
+    <div
+      role={error ? "alert" : "status"}
+      className={`notice ${error ? "notice-error" : ""}`}
+    >
       {error || message}
     </div>
   ) : null;
@@ -96,9 +106,15 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
           String(form.get("password")),
         ),
       );
-      const returnPath = new URLSearchParams(window.location.search).get("next");
+      const returnPath =
+        new URLSearchParams(window.location.search).get("next") ??
+        (window.location.pathname.startsWith("/app")
+          ? window.location.pathname + window.location.search
+          : null);
       navigate(
-        returnPath?.startsWith("/accept-invitation?token=")
+        returnPath?.startsWith("/accept-invitation?token=") ||
+          returnPath?.startsWith("/app/") ||
+          returnPath === "/app"
           ? returnPath
           : "/app",
       );
@@ -110,6 +126,9 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
   }
   return (
     <AuthShell eyebrow="Welcome back" title="Sign in to your workspace">
+      {new URLSearchParams(window.location.search).has("expired") && (
+        <Status message="Your session expired. Sign in again." />
+      )}
       <form onSubmit={submit}>
         <Field
           label="Work email"
@@ -222,17 +241,38 @@ function TokenAction({ mode }: { mode: "verify" | "reset" }) {
     mode === "verify" ? "Verifying your email…" : "",
   );
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const verification = useRef<{
+    token: string;
+    result: ReturnType<typeof api.verifyEmail>;
+  } | null>(null);
   const token = new URLSearchParams(window.location.search).get("token") ?? "";
   useEffect(() => {
-    if (mode === "verify")
-      api
-        .verifyEmail(token)
-        .then((result) => setMessage(result.message))
-        .catch((reason: Error) => setError(reason.message));
+    if (mode !== "verify") return;
+    if (verification.current?.token !== token)
+      verification.current = { token, result: api.verifyEmail(token) };
+    let active = true;
+    verification.current.result
+      .then((result) => {
+        if (active) {
+          setMessage(result.message);
+          setError("");
+        }
+      })
+      .catch((reason: Error) => {
+        if (active) {
+          setMessage("");
+          setError(reason.message);
+        }
+      });
+    return () => {
+      active = false;
+    };
   }, [mode, token]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
+    setBusy(true);
     try {
       setMessage(
         (
@@ -244,6 +284,8 @@ function TokenAction({ mode }: { mode: "verify" | "reset" }) {
       );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Request failed");
+    } finally {
+      setBusy(false);
     }
   }
   return (
@@ -253,7 +295,7 @@ function TokenAction({ mode }: { mode: "verify" | "reset" }) {
         mode === "verify" ? "Confirming your account" : "Choose a new password"
       }
     >
-      {mode === "reset" && (
+      {mode === "reset" && !message && (
         <form onSubmit={submit}>
           <Field
             label="New password"
@@ -262,7 +304,9 @@ function TokenAction({ mode }: { mode: "verify" | "reset" }) {
             minLength={12}
             required
           />
-          <button className="primary">Update password</button>
+          <button className="primary" disabled={busy}>
+            {busy ? "Updating?" : "Update password"}
+          </button>
         </form>
       )}
       <Status message={message} error={error} />
@@ -278,9 +322,11 @@ function TokenAction({ mode }: { mode: "verify" | "reset" }) {
 function ForgotPassword() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
+    setBusy(true);
     try {
       setMessage(
         (
@@ -291,6 +337,8 @@ function ForgotPassword() {
       );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Request failed");
+    } finally {
+      setBusy(false);
     }
   }
   return (
@@ -301,7 +349,9 @@ function ForgotPassword() {
       <form onSubmit={submit}>
         <Field label="Work email" name="email" type="email" required />
         <Status message={message} error={error} />
-        <button className="primary">Send reset link</button>
+        <button className="primary" disabled={busy}>
+          {busy ? "Sending?" : "Send reset link"}
+        </button>
       </form>
       <p className="switch">
         <button className="text-button" onClick={() => navigate("/login")}>
@@ -315,9 +365,11 @@ function ForgotPassword() {
 function ResendVerification() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
+    setBusy(true);
     try {
       setMessage(
         (
@@ -328,6 +380,8 @@ function ResendVerification() {
       );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Request failed");
+    } finally {
+      setBusy(false);
     }
   }
   return (
@@ -341,7 +395,9 @@ function ResendVerification() {
       <form onSubmit={submit}>
         <Field label="Work email" name="email" type="email" required />
         <Status message={message} error={error} />
-        <button className="primary">Send verification link</button>
+        <button className="primary" disabled={busy}>
+          {busy ? "Sending?" : "Send verification link"}
+        </button>
       </form>
       <p className="switch">
         <button className="text-button" onClick={() => navigate("/login")}>
@@ -355,12 +411,15 @@ function ResendVerification() {
 function AcceptInvitation({ session }: { session: Session | null }) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
   const token = new URLSearchParams(window.location.search).get("token") ?? "";
   async function accept() {
     if (!session) {
       const invitationPath = `/accept-invitation?token=${encodeURIComponent(token)}`;
       return navigate(`/login?next=${encodeURIComponent(invitationPath)}`);
     }
+    setBusy(true);
+    setError("");
     try {
       setMessage((await api.acceptInvitation(session, token)).message);
     } catch (reason) {
@@ -369,6 +428,8 @@ function AcceptInvitation({ session }: { session: Session | null }) {
           ? reason.message
           : "Unable to accept invitation",
       );
+    } finally {
+      setBusy(false);
     }
   }
   return (
@@ -380,9 +441,22 @@ function AcceptInvitation({ session }: { session: Session | null }) {
         Accept this invitation to add the organization to your account.
       </p>
       <Status message={message} error={error} />
-      <button className="primary" onClick={accept}>
-        {session ? "Accept invitation" : "Sign in to continue"}
-      </button>
+      {message ? (
+        <button
+          className="primary"
+          onClick={() => window.location.assign("/app")}
+        >
+          Open workspace
+        </button>
+      ) : (
+        <button className="primary" disabled={busy} onClick={accept}>
+          {busy
+            ? "Accepting?"
+            : session
+              ? "Accept invitation"
+              : "Sign in to continue"}
+        </button>
+      )}
     </AuthShell>
   );
 }
@@ -391,11 +465,29 @@ function App() {
   const path = usePath();
   const [session, setSession] = useState<Session | null>(null);
   const [checking, setChecking] = useState(true);
+  const [connectionError, setConnectionError] = useState("");
+  useEffect(() => {
+    const expired = () => {
+      setSession(null);
+      navigate("/login?expired=1");
+    };
+    window.addEventListener("identity:expired", expired);
+    const denied = () => navigate("/access-denied");
+    window.addEventListener("identity:denied", denied);
+    return () => {
+      window.removeEventListener("identity:expired", expired);
+      window.removeEventListener("identity:denied", denied);
+    };
+  }, []);
   useEffect(() => {
     api
       .session()
       .then(setSession)
-      .catch(() => setSession(null))
+      .catch((reason: Error) => {
+        setSession(null);
+        if (!(reason instanceof ApiError && reason.status === 401))
+          setConnectionError(reason.message);
+      })
       .finally(() => setChecking(false));
   }, []);
   if (checking)
@@ -405,7 +497,31 @@ function App() {
         <span>Loading secure workspace…</span>
       </div>
     );
+  if (connectionError)
+    return (
+      <AuthShell
+        eyebrow="Connection unavailable"
+        title="Unable to load your workspace"
+      >
+        <Status error={connectionError} />
+        <button className="primary" onClick={() => window.location.reload()}>
+          Retry connection
+        </button>
+      </AuthShell>
+    );
   if (path === "/register") return <Register />;
+  if (path === "/access-denied")
+    return (
+      <AuthShell eyebrow="Workspace security" title="Access denied">
+        <p>
+          Your current role does not allow this action. Ask your workspace
+          administrator for access.
+        </p>
+        <button className="primary" onClick={() => navigate("/app")}>
+          Return to workspace
+        </button>
+      </AuthShell>
+    );
   if (path === "/forgot-password") return <ForgotPassword />;
   if (path === "/resend-verification") return <ResendVerification />;
   if (path === "/reset-password") return <TokenAction mode="reset" />;

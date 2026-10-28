@@ -2,6 +2,13 @@
 .env
 backend/.env
 frontend/.env
+.env.*
+**/.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.env
 
 # Python
 __pycache__/

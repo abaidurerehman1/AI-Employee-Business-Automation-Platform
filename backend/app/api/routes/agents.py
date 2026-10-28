@@ -3,7 +3,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -12,15 +12,14 @@ from sqlalchemy import func, select
 from app.api.dependencies import (
     DbSession,
     TenantContext,
-    get_tenant_context,
     require_csrf,
-    require_roles,
+    require_permission,
 )
 from app.core.agent_tools import CRM_WRITE_TOOLS, TOOL_REGISTRY, ToolInputError, validate_tool_arguments
 import json
 from app.core.config import settings
 from app.core.embeddings import EmbeddingError
-from app.core.openai_client import ProviderError, generate_response
+from app.core.openai_client import ProviderError
 from app.core.rag_graph import run_rag_agent
 from app.core.temporal_client import (
     TemporalUnavailable,
@@ -35,9 +34,9 @@ from app.models.knowledge import KnowledgeDocument
 router = APIRouter(prefix="/agents", tags=["agents"])
 logger = logging.getLogger(__name__)
 ManagerContext = Annotated[
-    TenantContext, Depends(require_roles(MembershipRole.admin, MembershipRole.manager))
+    TenantContext, Depends(require_permission("agents.manage"))
 ]
-Tenant = Annotated[TenantContext, Depends(get_tenant_context)]
+Tenant = Annotated[TenantContext, Depends(require_permission("agents.use"))]
 CsrfUser = Annotated[User, Depends(require_csrf)]
 
 
@@ -86,6 +85,7 @@ class AgentResponse(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     conversation_id: uuid.UUID | None = None
+    page_context: Literal["overview", "agents", "knowledge", "crm", "inbound", "messaging", "campaigns", "notifications", "people", "settings"] | None = None
 
 
 class HandoffRequest(BaseModel):
@@ -561,6 +561,8 @@ async def run_chat(
         f"Role: {version.role}\nTone: {version.tone}\n"
         f"Language: {version.language}\n\n{version.instructions}"
     )
+    if payload.page_context:
+        prompt += f"\nThe user opened this conversation from the {payload.page_context} page in this workspace. This is navigation context only, not record data. Do not infer metrics or record contents from the page name."
     ready_documents = await db.scalar(
         select(func.count(KnowledgeDocument.id)).where(
             KnowledgeDocument.organization_id == context.organization.id,

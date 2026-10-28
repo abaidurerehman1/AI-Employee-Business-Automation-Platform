@@ -29,7 +29,7 @@ services:
       retries: 10
 
   temporal:
-    image: temporalio/temporal:latest
+    image: temporalio/temporal@sha256:ad4c82c97bd12b417d1ea942610dbcd511afb250c4d5ed26c694009533df447e
     # Docker-created local volumes are root-owned; the development server must
     # be able to initialize its persistent SQLite database on first startup.
     user: "0:0"
@@ -60,13 +60,13 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      APP_ENV: development
+      APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_employee}:${POSTGRES_PASSWORD:-local_development_only}@postgres:5432/${POSTGRES_DB:-ai_employee}
       REDIS_URL: redis://redis:6379/0
       TEMPORAL_ADDRESS: temporal:7233
       CORS_ORIGINS: '["http://localhost:${FRONTEND_PORT:-5173}"]'
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,21 +75,30 @@ services:
       temporal:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/ready', timeout=8)"]
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 30s
+    restart: unless-stopped
 
   worker:
     build: ./backend
     env_file:
       - ./backend/.env
     environment:
-      APP_ENV: development
+      APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_employee}:${POSTGRES_PASSWORD:-local_development_only}@postgres:5432/${POSTGRES_DB:-ai_employee}
       REDIS_URL: redis://redis:6379/0
       TEMPORAL_ADDRESS: temporal:7233
-    command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--beat", "--schedule=/tmp/celerybeat-schedule", "--loglevel=info", "--concurrency=2"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 3 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       backend:
         condition: service_healthy
@@ -101,10 +110,17 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      APP_ENV: development
+      APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ai_employee}:${POSTGRES_PASSWORD:-local_development_only}@postgres:5432/${POSTGRES_DB:-ai_employee}
       TEMPORAL_ADDRESS: temporal:7233
     command: ["python", "-m", "app.temporal_worker"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.core.worker_health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     depends_on:
       backend:
         condition: service_healthy
@@ -117,7 +133,13 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api/v1}
     ports:
-      - "${FRONTEND_PORT:-5173}:80"
+      - "127.0.0.1:${FRONTEND_PORT:-5173}:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     depends_on:
       backend:
         condition: service_healthy

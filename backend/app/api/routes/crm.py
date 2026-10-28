@@ -6,19 +6,19 @@ import re
 import unicodedata
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from openpyxl import load_workbook
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
-from app.api.dependencies import DbSession, TenantContext, get_tenant_context, require_csrf, require_roles
-from app.models.auth import Membership, MembershipRole, User
+from app.api.dependencies import DbSession, TenantContext, require_csrf, require_permission
+from app.models.auth import Membership, User
 from app.models.crm import CRMActivity, Company, Contact, Deal, Lead
 
 router = APIRouter(prefix="/crm", tags=["crm"])
-Tenant = Annotated[TenantContext, Depends(get_tenant_context)]
-Manager = Annotated[TenantContext, Depends(require_roles(MembershipRole.admin, MembershipRole.manager))]
+Tenant = Annotated[TenantContext, Depends(require_permission("crm.read"))]
+Manager = Annotated[TenantContext, Depends(require_permission("crm.manage"))]
 Csrf = Annotated[User, Depends(require_csrf)]
 Kind = Literal["companies", "contacts", "leads", "deals"]
 MODELS = {"companies": Company, "contacts": Contact, "leads": Lead, "deals": Deal}
@@ -97,7 +97,7 @@ async def validate_links(db, organization_id, data):
             await scoped(db, model, organization_id, data[field])
     if data.get("owner_id"):
         member = await db.scalar(select(Membership.id).where(
-            Membership.organization_id == organization_id, Membership.user_id == data["owner_id"]))
+            Membership.organization_id == organization_id, Membership.user_id == data["owner_id"], Membership.is_active.is_(True)))
         if not member:
             raise HTTPException(400, "Owner must belong to this organization")
 

@@ -9,7 +9,7 @@ from app.db.base import Base
 from app.models import SystemRecord  # noqa: F401
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -40,9 +40,23 @@ async def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-    await connectable.dispose()
+    try:
+        async with connectable.connect() as connection:
+            postgres = connection.dialect.name == "postgresql"
+            if postgres:
+                from sqlalchemy import text
+
+                await connection.execute(text("SELECT pg_advisory_lock(734829104)"))
+                await connection.commit()
+            try:
+                await connection.run_sync(do_run_migrations)
+            finally:
+                if postgres:
+                    await connection.rollback()
+                    await connection.execute(text("SELECT pg_advisory_unlock(734829104)"))
+                    await connection.commit()
+    finally:
+        await connectable.dispose()
 
 
 if context.is_offline_mode():

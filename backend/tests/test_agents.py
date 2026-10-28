@@ -184,7 +184,7 @@ def test_agent_versions_chat_and_tenant_isolation(client: TestClient) -> None:
     agent_id = created.json()["id"]
     assert (
         client.post(
-            f"/api/v1/agents/{agent_id}/chat", json={"message": "Hi"}, headers=headers
+            f"/api/v1/agents/{agent_id}/chat", json={"message": "Hi", "page_context":"crm"}, headers=headers
         ).status_code
         == 409
     )
@@ -221,10 +221,12 @@ def test_agent_versions_chat_and_tenant_isolation(client: TestClient) -> None:
     model = AsyncMock(return_value="Hello!")
     with patch("app.core.rag_graph.generate_response", new=model):
         published_chat = client.post(
-            f"/api/v1/agents/{agent_id}/chat", json={"message": "Hi"}, headers=headers
+            f"/api/v1/agents/{agent_id}/chat", json={"message": "Hi", "page_context":"crm"}, headers=headers
         )
     assert published_chat.status_code == 200
     assert "Be helpful" in model.await_args.args[1]
+    assert "crm page" in model.await_args.args[1]
+    assert "navigation context only" in model.await_args.args[1]
     assert "Updated" not in model.await_args.args[1]
     assert (
         client.post(f"/api/v1/agents/{agent_id}/pause", headers=headers).json()["status"]

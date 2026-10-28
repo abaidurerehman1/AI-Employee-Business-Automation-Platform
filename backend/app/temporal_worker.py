@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from contextlib import suppress
 
 from temporalio import activity
 from temporalio.client import Client
@@ -12,6 +13,9 @@ from app.temporal.activities import (
     resume_agent_conversation,
 )
 from app.temporal.workflows import AgentToolExecutionWorkflow
+from app.temporal.campaigns import CampaignWorkflow, campaign_tick
+from app.core.worker_health import heartbeat
+from app.core.observability import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +26,8 @@ async def run_worker() -> None:
             client = await Client.connect(
                 settings.temporal_address,
                 namespace=settings.temporal_namespace,
+                tls=settings.temporal_tls,
+                api_key=settings.temporal_api_key or None,
             )
             break
         except Exception:
@@ -31,12 +37,19 @@ async def run_worker() -> None:
     worker = Worker(
         client,
         task_queue=settings.temporal_task_queue,
-        workflows=[AgentToolExecutionWorkflow],
-        activities=[execute_agent_tool, read_tool_decision, resume_agent_conversation],
+        workflows=[AgentToolExecutionWorkflow, CampaignWorkflow],
+        activities=[execute_agent_tool, read_tool_decision, resume_agent_conversation, campaign_tick],
     )
-    await worker.run()
+    pulse = asyncio.create_task(heartbeat())
+    try:
+        await worker.run()
+    finally:
+        pulse.cancel()
+        with suppress(asyncio.CancelledError):
+            await pulse
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    configure_logging(settings.log_level)
     asyncio.run(run_worker())

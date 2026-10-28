@@ -10,6 +10,8 @@ import {
   type Session,
 } from "../api/client";
 import { Button, Dialog, State } from "./ui";
+import { Icon } from "./Icons";
+import { navigation } from "../navigation";
 
 const initial: AgentConfig = {
   name: "",
@@ -72,20 +74,76 @@ export function Agents({
     const timer = window.setInterval(async () => {
       try {
         if (canManage) {
-          const requests = await api.agentToolRequests(organizationId, playground.id);
+          const requests = await api.agentToolRequests(
+            organizationId,
+            playground.id,
+          );
           if (!active) return;
           setToolRequests(requests);
         }
         if (chat?.conversation_id && !busy) {
-          const conversation = await api.agentConversation(organizationId, playground.id, chat.conversation_id);
+          const conversation = await api.agentConversation(
+            organizationId,
+            playground.id,
+            chat.conversation_id,
+          );
           if (active) setChat(conversation);
         }
       } catch {
         // Keep the last known state; explicit actions report errors to the user.
       }
     }, 5000);
-    return () => { active = false; window.clearInterval(timer); };
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, [organizationId, playground, canManage, chat?.conversation_id, busy]);
+  const sourcePageValue = new URLSearchParams(window.location.search).get(
+    "from",
+  );
+  const sourcePage = navigation.some((item) => item.id === sourcePageValue)
+    ? (sourcePageValue ?? undefined)
+    : undefined;
+  const initialRecord = new URLSearchParams(window.location.search).get(
+    "record",
+  );
+  useEffect(() => {
+    if (!initialRecord) return;
+    let active = true;
+    const record = agents.find((item) => item.id === initialRecord);
+    if (!record) return;
+    const mode =
+      canManage &&
+      new URLSearchParams(window.location.search).get("chat") !== "1"
+        ? "playground"
+        : "chat";
+    Promise.all([
+      api.agentConversations(organizationId, record.id),
+      canManage
+        ? api.agentToolRequests(organizationId, record.id)
+        : Promise.resolve([]),
+    ])
+      .then(([conversations, requests]) => {
+        if (active) {
+          setPlayground(record);
+          setChatMode(mode);
+          setConversations(
+            mode === "chat"
+              ? conversations.filter(
+                  (item) => item.version_id === record.published_version_id,
+                )
+              : conversations,
+          );
+          setToolRequests(requests);
+        }
+      })
+      .catch((reason: Error) => {
+        if (active) setError(reason.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [agents, initialRecord, organizationId, canManage]);
   function openEditor(agent?: Agent) {
     setEditing(agent ?? null);
     setConfig(
@@ -233,9 +291,15 @@ export function Agents({
     setError("");
     try {
       await api.retryAgentTool(organizationId, session, playground.id, id);
-      setToolRequests(await api.agentToolRequests(organizationId, playground.id));
+      setToolRequests(
+        await api.agentToolRequests(organizationId, playground.id),
+      );
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to retry tool request");
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Unable to retry tool request",
+      );
     } finally {
       setBusy(false);
     }
@@ -247,14 +311,26 @@ export function Agents({
     setBusy(true);
     setError("");
     try {
-      const result = await api.handoffConversation(organizationId, session, playground.id, chat.conversation_id, targetId);
+      const result = await api.handoffConversation(
+        organizationId,
+        session,
+        playground.id,
+        chat.conversation_id,
+        targetId,
+      );
       setPlayground(target);
       setChatMode("chat");
       setChat(result);
       setConversations(await api.agentConversations(organizationId, targetId));
-      setToolRequests(canManage ? await api.agentToolRequests(organizationId, targetId) : []);
+      setToolRequests(
+        canManage ? await api.agentToolRequests(organizationId, targetId) : [],
+      );
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to transfer conversation");
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Unable to transfer conversation",
+      );
     } finally {
       setBusy(false);
     }
@@ -275,6 +351,7 @@ export function Agents({
           message,
           chat?.conversation_id,
           chatMode,
+          sourcePage,
         ),
       );
       form.reset();
@@ -303,8 +380,9 @@ export function Agents({
   }
   const pendingForConversation = toolRequests.some(
     (request) =>
-      ["pending", "approved", "queued", "running", "resume_failed"].includes(request.status) &&
-      request.conversation_id === chat?.conversation_id,
+      ["pending", "approved", "queued", "running", "resume_failed"].includes(
+        request.status,
+      ) && request.conversation_id === chat?.conversation_id,
   );
   return (
     <section className="shell-card">
@@ -321,17 +399,33 @@ export function Agents({
       {loading ? (
         <State>Loading AI employees…</State>
       ) : !agents.length ? (
-        <State>No AI employees yet.</State>
+        <State>
+          <div className="workspace-empty">
+            <span className="empty-icon">
+              <Icon name="sparkles" />
+            </span>
+            <strong>No AI employees yet.</strong>
+            <p>
+              Create your first AI employee, give it a role and choose the tools
+              it can use.
+            </p>
+          </div>
+        </State>
       ) : (
         <div className="agent-list">
           {agents.map((agent) => (
             <article className="agent-card" key={agent.id}>
-              <div>
-                <strong>{agent.name}</strong>
-                <p>{agent.latest_version.role}</p>
-                <span className="shell-role">
-                  {agent.status} · v{agent.latest_version.version}
+              <div className="agent-identity">
+                <span className="agent-identity-icon">
+                  <Icon name="sparkles" />
                 </span>
+                <div>
+                  <strong>{agent.name}</strong>
+                  <p>{agent.latest_version.role}</p>
+                  <span className="shell-role">
+                    {agent.status} · v{agent.latest_version.version}
+                  </span>
+                </div>
               </div>
               {canManage && (
                 <div className="agent-actions">
@@ -421,10 +515,18 @@ export function Agents({
                 onChange={(event) =>
                   setConfig({
                     ...config,
-                    tools: event.target.checked ? [...config.tools, "get_current_utc_time"] : config.tools.filter((item) => item !== "get_current_utc_time"),
+                    tools: event.target.checked
+                      ? [...config.tools, "get_current_utc_time"]
+                      : config.tools.filter(
+                          (item) => item !== "get_current_utc_time",
+                        ),
                     approval_rules: event.target.checked
                       ? { ...config.approval_rules, get_current_utc_time: true }
-                      : Object.fromEntries(Object.entries(config.approval_rules).filter(([key]) => key !== "get_current_utc_time")),
+                      : Object.fromEntries(
+                          Object.entries(config.approval_rules).filter(
+                            ([key]) => key !== "get_current_utc_time",
+                          ),
+                        ),
                   })
                 }
               />{" "}
@@ -449,42 +551,193 @@ export function Agents({
               </label>
             )}
             <label>
-              <input type="checkbox" checked={config.tools.includes("search_crm_contacts")} onChange={(event) => setConfig({
-                ...config,
-                tools: event.target.checked ? [...config.tools, "search_crm_contacts"] : config.tools.filter((item) => item !== "search_crm_contacts"),
-                approval_rules: event.target.checked ? { ...config.approval_rules, search_crm_contacts: true } : Object.fromEntries(Object.entries(config.approval_rules).filter(([key]) => key !== "search_crm_contacts")),
-              })} /> Enable CRM contact search
+              <input
+                type="checkbox"
+                checked={config.tools.includes("search_crm_contacts")}
+                onChange={(event) =>
+                  setConfig({
+                    ...config,
+                    tools: event.target.checked
+                      ? [...config.tools, "search_crm_contacts"]
+                      : config.tools.filter(
+                          (item) => item !== "search_crm_contacts",
+                        ),
+                    approval_rules: event.target.checked
+                      ? { ...config.approval_rules, search_crm_contacts: true }
+                      : Object.fromEntries(
+                          Object.entries(config.approval_rules).filter(
+                            ([key]) => key !== "search_crm_contacts",
+                          ),
+                        ),
+                  })
+                }
+              />{" "}
+              Enable CRM contact search
             </label>
-            {config.tools.includes("search_crm_contacts") && <label><input type="checkbox" checked={config.approval_rules.search_crm_contacts !== false} onChange={(event) => setConfig({ ...config, approval_rules: { ...config.approval_rules, search_crm_contacts: event.target.checked } })} /> Require approval for CRM search</label>}
-            <label><input type="checkbox" checked={config.tools.includes("search_crm_leads")} onChange={(event) => setConfig({
-              ...config, tools: event.target.checked ? [...config.tools, "search_crm_leads"] : config.tools.filter((item) => item !== "search_crm_leads"),
-              approval_rules: event.target.checked ? { ...config.approval_rules, search_crm_leads: true } : Object.fromEntries(Object.entries(config.approval_rules).filter(([key]) => key !== "search_crm_leads")),
-            })} /> Enable CRM lead search</label>
-            {config.tools.includes("search_crm_leads") && <label><input type="checkbox" checked={config.approval_rules.search_crm_leads !== false} onChange={(event) => setConfig({ ...config, approval_rules: { ...config.approval_rules, search_crm_leads: event.target.checked } })} /> Require approval for lead search</label>}
-            {([ ["search_crm_companies", "Search CRM companies"], ["search_crm_deals", "Search CRM deals"] ] as const).map(([name, label]) => <div key={name}>
-              <label><input type="checkbox" checked={config.tools.includes(name)} onChange={(event) => setConfig({ ...config,
-                tools: event.target.checked ? [...config.tools, name] : config.tools.filter((item) => item !== name),
-                approval_rules: event.target.checked ? { ...config.approval_rules, [name]: true } : Object.fromEntries(Object.entries(config.approval_rules).filter(([key]) => key !== name)),
-              })} /> {label}</label>
-              {config.tools.includes(name) && <label><input type="checkbox" checked={config.approval_rules[name] !== false} onChange={(event) => setConfig({ ...config, approval_rules: { ...config.approval_rules, [name]: event.target.checked } })} /> Require approval</label>}
-            </div>)}
-            {([
-              ["create_crm_contact", "Create CRM contacts"],
-              ["update_crm_contact", "Update CRM contacts"],
-              ["create_crm_lead", "Create CRM leads"],
-              ["update_crm_lead", "Update CRM leads"],
-              ["create_crm_company", "Create CRM companies"],
-              ["update_crm_company", "Update CRM companies"],
-              ["create_crm_deal", "Create CRM deals"],
-              ["update_crm_deal", "Update CRM deals"],
-            ] as const).map(([name, label]) => <div key={name}>
-              <label><input type="checkbox" checked={config.tools.includes(name)} onChange={(event) => setConfig({
-                ...config,
-                tools: event.target.checked ? [...config.tools, name] : config.tools.filter((item) => item !== name),
-                approval_rules: event.target.checked ? { ...config.approval_rules, [name]: true } : Object.fromEntries(Object.entries(config.approval_rules).filter(([key]) => key !== name)),
-              })} /> {label}</label>
-              {config.tools.includes(name) && <label><input type="checkbox" checked={config.approval_rules[name] !== false} onChange={(event) => setConfig({ ...config, approval_rules: { ...config.approval_rules, [name]: event.target.checked } })} /> Require approval</label>}
-            </div>)}
+            {config.tools.includes("search_crm_contacts") && (
+              <label>
+                <input
+                  type="checkbox"
+                  checked={config.approval_rules.search_crm_contacts !== false}
+                  onChange={(event) =>
+                    setConfig({
+                      ...config,
+                      approval_rules: {
+                        ...config.approval_rules,
+                        search_crm_contacts: event.target.checked,
+                      },
+                    })
+                  }
+                />{" "}
+                Require approval for CRM search
+              </label>
+            )}
+            <label>
+              <input
+                type="checkbox"
+                checked={config.tools.includes("search_crm_leads")}
+                onChange={(event) =>
+                  setConfig({
+                    ...config,
+                    tools: event.target.checked
+                      ? [...config.tools, "search_crm_leads"]
+                      : config.tools.filter(
+                          (item) => item !== "search_crm_leads",
+                        ),
+                    approval_rules: event.target.checked
+                      ? { ...config.approval_rules, search_crm_leads: true }
+                      : Object.fromEntries(
+                          Object.entries(config.approval_rules).filter(
+                            ([key]) => key !== "search_crm_leads",
+                          ),
+                        ),
+                  })
+                }
+              />{" "}
+              Enable CRM lead search
+            </label>
+            {config.tools.includes("search_crm_leads") && (
+              <label>
+                <input
+                  type="checkbox"
+                  checked={config.approval_rules.search_crm_leads !== false}
+                  onChange={(event) =>
+                    setConfig({
+                      ...config,
+                      approval_rules: {
+                        ...config.approval_rules,
+                        search_crm_leads: event.target.checked,
+                      },
+                    })
+                  }
+                />{" "}
+                Require approval for lead search
+              </label>
+            )}
+            {(
+              [
+                ["search_crm_companies", "Search CRM companies"],
+                ["search_crm_deals", "Search CRM deals"],
+              ] as const
+            ).map(([name, label]) => (
+              <div key={name}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={config.tools.includes(name)}
+                    onChange={(event) =>
+                      setConfig({
+                        ...config,
+                        tools: event.target.checked
+                          ? [...config.tools, name]
+                          : config.tools.filter((item) => item !== name),
+                        approval_rules: event.target.checked
+                          ? { ...config.approval_rules, [name]: true }
+                          : Object.fromEntries(
+                              Object.entries(config.approval_rules).filter(
+                                ([key]) => key !== name,
+                              ),
+                            ),
+                      })
+                    }
+                  />{" "}
+                  {label}
+                </label>
+                {config.tools.includes(name) && (
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={config.approval_rules[name] !== false}
+                      onChange={(event) =>
+                        setConfig({
+                          ...config,
+                          approval_rules: {
+                            ...config.approval_rules,
+                            [name]: event.target.checked,
+                          },
+                        })
+                      }
+                    />{" "}
+                    Require approval
+                  </label>
+                )}
+              </div>
+            ))}
+            {(
+              [
+                ["create_crm_contact", "Create CRM contacts"],
+                ["update_crm_contact", "Update CRM contacts"],
+                ["create_crm_lead", "Create CRM leads"],
+                ["update_crm_lead", "Update CRM leads"],
+                ["create_crm_company", "Create CRM companies"],
+                ["update_crm_company", "Update CRM companies"],
+                ["create_crm_deal", "Create CRM deals"],
+                ["update_crm_deal", "Update CRM deals"],
+              ] as const
+            ).map(([name, label]) => (
+              <div key={name}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={config.tools.includes(name)}
+                    onChange={(event) =>
+                      setConfig({
+                        ...config,
+                        tools: event.target.checked
+                          ? [...config.tools, name]
+                          : config.tools.filter((item) => item !== name),
+                        approval_rules: event.target.checked
+                          ? { ...config.approval_rules, [name]: true }
+                          : Object.fromEntries(
+                              Object.entries(config.approval_rules).filter(
+                                ([key]) => key !== name,
+                              ),
+                            ),
+                      })
+                    }
+                  />{" "}
+                  {label}
+                </label>
+                {config.tools.includes(name) && (
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={config.approval_rules[name] !== false}
+                      onChange={(event) =>
+                        setConfig({
+                          ...config,
+                          approval_rules: {
+                            ...config.approval_rules,
+                            [name]: event.target.checked,
+                          },
+                        })
+                      }
+                    />{" "}
+                    Require approval
+                  </label>
+                )}
+              </div>
+            ))}
           </fieldset>
           {error && <State error>{error}</State>}
           <div className="dialog-actions">
@@ -516,6 +769,16 @@ export function Agents({
           setError("");
         }}
       >
+        {sourcePage && (
+          <p className="assistant-context">
+            Opened from {sourcePage} in{" "}
+            {
+              session.organizations.find((item) => item.id === organizationId)
+                ?.name
+            }
+            . Record access and approvals follow this AI employee?s permissions.
+          </p>
+        )}
         {canManage &&
           (playground?.latest_version.tools.includes("get_current_utc_time") ||
             toolRequests.length > 0) && (
@@ -539,7 +802,16 @@ export function Agents({
                     {item.error_message && ` · ${item.error_message}`}
                     {!item.conversation_id && " · Standalone or older request"}
                   </span>
-                  {item.arguments && Object.keys(item.arguments).length > 0 && <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(item.arguments, null, 2)}</pre>}
+                  {item.arguments && Object.keys(item.arguments).length > 0 && (
+                    <pre
+                      style={{
+                        whiteSpace: "pre-wrap",
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      {JSON.stringify(item.arguments, null, 2)}
+                    </pre>
+                  )}
                   {item.status === "pending" && (
                     <div className="agent-actions">
                       <Button
@@ -561,7 +833,12 @@ export function Agents({
                     </div>
                   )}
                   {["failed", "resume_failed"].includes(item.status) && (
-                    <Button variant="secondary" type="button" disabled={busy} onClick={() => retryTool(item.id)}>
+                    <Button
+                      variant="secondary"
+                      type="button"
+                      disabled={busy}
+                      onClick={() => retryTool(item.id)}
+                    >
                       Retry
                     </Button>
                   )}
@@ -608,17 +885,33 @@ export function Agents({
             </select>
           </label>
         )}
-        {chat && agents.some((agent) => agent.id !== playground?.id && agent.status === "published") && (
-          <label className="field">
-            <span>Transfer conversation to another AI employee</span>
-            <select value="" disabled={busy || pendingForConversation} onChange={(event) => void handoff(event.target.value)}>
-              <option value="">Choose an AI employee</option>
-              {agents.filter((agent) => agent.id !== playground?.id && agent.status === "published").map((agent) => (
-                <option key={agent.id} value={agent.id}>{agent.name}</option>
-              ))}
-            </select>
-          </label>
-        )}
+        {chat &&
+          agents.some(
+            (agent) =>
+              agent.id !== playground?.id && agent.status === "published",
+          ) && (
+            <label className="field">
+              <span>Transfer conversation to another AI employee</span>
+              <select
+                value=""
+                disabled={busy || pendingForConversation}
+                onChange={(event) => void handoff(event.target.value)}
+              >
+                <option value="">Choose an AI employee</option>
+                {agents
+                  .filter(
+                    (agent) =>
+                      agent.id !== playground?.id &&
+                      agent.status === "published",
+                  )
+                  .map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          )}
         <div className="agent-messages">
           {chat?.messages.map((item, index) => (
             <div className={`agent-message ${item.role}`} key={index}>

@@ -1,6 +1,13 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { api, type KnowledgeDocument, type Session } from "../api/client";
 import { Button, State } from "./ui";
+import { Icon } from "./Icons";
 
 export function Knowledge({
   organizationId,
@@ -15,9 +22,23 @@ export function Knowledge({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const focusedRecord = useRef<string | null>(null);
   const load = useCallback(async () => {
     try {
       setDocuments(await api.documents(organizationId));
+      const target = new URLSearchParams(window.location.search).get("record");
+      if (
+        target &&
+        focusedRecord.current !== target &&
+        typeof requestAnimationFrame !== "undefined"
+      )
+        requestAnimationFrame(() => {
+          const item = document.getElementById("knowledge-" + target);
+          if (item) {
+            item.scrollIntoView?.({ block: "nearest" });
+            focusedRecord.current = target;
+          }
+        });
       setError("");
     } catch (reason) {
       setError(
@@ -100,12 +121,30 @@ export function Knowledge({
         <State>Loading documents…</State>
       ) : documents.length === 0 ? (
         <State>
-          No documents yet. Upload one to give your agents company knowledge.
+          <div className="workspace-empty">
+            <span className="empty-icon">
+              <Icon name="book" />
+            </span>
+            <strong>Your company knowledge starts here</strong>
+            <p>
+              No documents yet. Upload one to give your agents company
+              knowledge.
+            </p>
+          </div>
         </State>
       ) : (
         <div className="agent-list">
           {documents.map((document) => (
-            <article className="agent-card" key={document.id}>
+            <article
+              className="agent-card"
+              data-record-id={document.id}
+              id={"knowledge-" + document.id}
+              data-selected={
+                document.id ===
+                new URLSearchParams(window.location.search).get("record")
+              }
+              key={document.id}
+            >
               <div>
                 <strong>{document.filename}</strong>
                 <p>

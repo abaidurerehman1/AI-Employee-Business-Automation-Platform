@@ -1,4 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { ApplicationShell } from "./components/ApplicationShell";
@@ -112,7 +118,9 @@ describe("authentication UI", () => {
       ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /People & access/ }));
-    expect(await screen.findByText("owner@example.com")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("cell", { name: "owner@example.com" }),
+    ).toBeInTheDocument();
   });
 
   it("refreshes the member count after an invitation is accepted", async () => {
@@ -190,28 +198,40 @@ describe("authentication UI", () => {
       organizations: [],
       csrf_token: "csrf",
     };
-    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/auth/session")) {
-        return {
-          ok: false,
-          status: 401,
-          json: async () => ({ detail: "Authentication required" }),
-        };
-      }
-      if (url.endsWith("/auth/login")) {
-        return { ok: true, status: 200, json: async () => session };
-      }
-      if (url.endsWith("/organizations/invitations/accept")) {
-        return { ok: true, status: 200, json: async () => ({ message: "Invitation accepted" }) };
-      }
-      throw new Error(`Unexpected request: ${url}`);
-    });
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/session")) {
+          return {
+            ok: false,
+            status: 401,
+            json: async () => ({ detail: "Authentication required" }),
+          };
+        }
+        if (url.endsWith("/auth/login")) {
+          return { ok: true, status: 200, json: async () => session };
+        }
+        if (url.endsWith("/organizations/invitations/accept")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ message: "Invitation accepted" }),
+          };
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
     vi.stubGlobal("fetch", fetchMock);
-    window.history.replaceState({}, "", "/accept-invitation?token=invite-token");
+    window.history.replaceState(
+      {},
+      "",
+      "/accept-invitation?token=invite-token",
+    );
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in to continue" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Sign in to continue" }),
+    );
     fireEvent.change(await screen.findByLabelText("Work email"), {
       target: { value: "invitee@example.com" },
     });
@@ -219,7 +239,9 @@ describe("authentication UI", () => {
       target: { value: "VerySecure123!" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Accept invitation" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Accept invitation" }),
+    );
 
     expect(await screen.findByText("Invitation accepted")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(

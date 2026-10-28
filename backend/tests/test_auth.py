@@ -3,6 +3,28 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 
+def test_inactive_account_cannot_sign_in(client: TestClient):
+    import asyncio
+    from sqlalchemy import select
+    from app.db.session import get_db
+    from app.main import app
+    from app.models.auth import User
+
+    register_and_verify(client, "inactive@example.com", "Inactive test")
+
+    async def deactivate():
+        async for db in app.dependency_overrides[get_db]():
+            user = await db.scalar(select(User).where(User.email == "inactive@example.com"))
+            user.is_active = False
+            await db.commit()
+
+    asyncio.run(deactivate())
+    response = client.post(
+        "/api/v1/auth/login", json={"email": "inactive@example.com", "password": "VerySecure123!"}
+    )
+    assert response.status_code == 401
+
+
 def register_and_verify(
     client: TestClient,
     email: str,

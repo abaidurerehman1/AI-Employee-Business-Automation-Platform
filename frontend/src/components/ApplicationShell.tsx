@@ -1,51 +1,40 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
   api,
-  type ActivityItem,
   type DashboardData,
   type Member,
   type Role,
   type Session,
 } from "../api/client";
-import { Button, Dialog, State, Table } from "./ui";
+import { Button, Dialog, Dropdown, Skeleton, State, Table } from "./ui";
 import { Icon } from "./Icons";
 import { Agents } from "./Agents";
 import { Knowledge } from "./Knowledge";
 import { CRM } from "./CRM";
 import { Inbound } from "./Inbound";
+import { Messaging } from "./Messaging";
+import { Campaigns } from "./Campaigns";
+import { IdentitySettings, TeamControls } from "./Identity";
+import { Dashboard } from "./Dashboard";
+import {
+  WorkspaceSearch,
+  AssistantLauncher,
+  NotificationCenter,
+} from "./WorkspaceTools";
+import {
+  currentView,
+  navigation,
+  resourcePath,
+  readPreference,
+  writePreference,
+} from "../navigation";
 import "./shell.css";
 
-type View = "overview" | "people" | "notifications" | "agents" | "knowledge" | "crm" | "inbound";
+type View = string;
 type Load<T> =
   | { state: "loading" }
   | { state: "error"; message: string }
   | { state: "ready"; data: T };
-
-function ActivityList({
-  items,
-  empty,
-}: {
-  items: ActivityItem[];
-  empty: string;
-}) {
-  if (!items.length) return <State>{empty}</State>;
-  return (
-    <ul className="activity-list">
-      {items.map((item) => (
-        <li key={item.id}>
-          <span className="activity-dot" aria-hidden="true" />
-          <div>
-            <strong>{item.title}</strong>
-            <p>{item.detail}</p>
-            <time dateTime={item.occurred_at}>
-              {new Date(item.occurred_at).toLocaleString()}
-            </time>
-          </div>
-        </li>
-      ))}
-    </ul>
-  );
-}
 
 export function ApplicationShell({
   session,
@@ -56,47 +45,168 @@ export function ApplicationShell({
   setSession: (value: Session | null) => void;
   navigate: (path: string) => void;
 }) {
-  const [organizationId, setOrganizationId] = useState(
-    session.organizations[0]?.id ?? "",
+  const [selectedOrganizationId, setOrganizationId] = useState(
+    () =>
+      new URLSearchParams(window.location.search).get("org") ??
+      readPreference(
+        "ai-employee:org:" + session.user.id,
+        session.organizations[0]?.id ?? "",
+      ),
   );
-  const [view, setView] = useState<View>("overview");
+  const [view, setView] = useState<View>(currentView);
   const [menuOpen, setMenuOpen] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [dashboard, setDashboard] = useState<Load<DashboardData>>({
+  const [dashboardResult, setDashboard] = useState<
+    Load<DashboardData> & { source?: string }
+  >({
     state: "loading",
   });
-  const [members, setMembers] = useState<Load<Member[]>>({ state: "loading" });
+  const [membersResult, setMembers] = useState<
+    Load<Member[]> & { source?: string }
+  >({ state: "loading" });
   const [refresh, setRefresh] = useState(0);
+  const [memberRefresh, setMemberRefresh] = useState(0);
+  const [days, setDays] = useState(30);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () =>
+      readPreference("ai-employee:sidebar:" + session.user.id, "expanded") ===
+      "collapsed",
+  );
+  const [routeKey, setRouteKey] = useState(
+    () => window.location.pathname + window.location.search,
+  );
   const [inviteError, setInviteError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const organizationId = session.organizations.some(
+    (item) => item.id === selectedOrganizationId,
+  )
+    ? selectedOrganizationId
+    : (session.organizations[0]?.id ?? "");
   const org = session.organizations.find((item) => item.id === organizationId);
   const canInvite = org?.role === "admin" || org?.role === "manager";
 
+  const requestKey = organizationId + ":" + org?.role + ":" + days;
+  const dashboard: Load<DashboardData> =
+    dashboardResult.source === requestKey
+      ? dashboardResult
+      : { state: "loading" };
+  const members: Load<Member[]> =
+    membersResult.source === organizationId
+      ? membersResult
+      : { state: "loading" };
+  useEffect(() => {
+    const update = () => {
+      setView(currentView());
+      setRouteKey(window.location.pathname + window.location.search);
+      const target = new URLSearchParams(window.location.search).get("org");
+      if (target && session.organizations.some((item) => item.id === target))
+        setOrganizationId(target);
+    };
+    window.addEventListener("popstate", update);
+    return () => window.removeEventListener("popstate", update);
+  }, [session.organizations]);
+  useEffect(() => {
+    writePreference("ai-employee:org:" + session.user.id, organizationId);
+  }, [organizationId, session.user.id]);
+  useEffect(() => {
+    writePreference(
+      "ai-employee:sidebar:" + session.user.id,
+      sidebarCollapsed ? "collapsed" : "expanded",
+    );
+  }, [sidebarCollapsed, session.user.id]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const sidebar = document.getElementById("app-navigation");
+    const toggle = document.querySelector<HTMLButtonElement>(".menu-toggle");
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    sidebar?.querySelector<HTMLButtonElement>("nav button")?.focus();
+    const keyboard = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const buttons = Array.from(
+        sidebar?.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), select, a[href]",
+        ) ?? [],
+      );
+      if (toggle) buttons.unshift(toggle);
+      const index = buttons.indexOf(document.activeElement as HTMLElement);
+      if (event.shiftKey && index <= 0) {
+        event.preventDefault();
+        buttons.at(-1)?.focus();
+      } else if (
+        !event.shiftKey &&
+        (index === buttons.length - 1 || index < 0)
+      ) {
+        event.preventDefault();
+        buttons[0]?.focus();
+      }
+    };
+    const resized = () => {
+      if (window.innerWidth > 800) setMenuOpen(false);
+    };
+    document.addEventListener("keydown", keyboard);
+    window.addEventListener("resize", resized);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", keyboard);
+      window.removeEventListener("resize", resized);
+      toggle?.focus();
+    };
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (!organizationId) return;
+    const controller = new AbortController();
+    void Promise.resolve().then(() => {
+      if (controller.signal.aborted) return;
+      api
+        .dashboard(organizationId, days, controller.signal)
+        .then((data) => {
+          if (!controller.signal.aborted)
+            setDashboard({ state: "ready", data, source: requestKey });
+        })
+        .catch((error: Error) => {
+          if (!controller.signal.aborted)
+            setDashboard({
+              state: "error",
+              message: error.message,
+              source: requestKey,
+            });
+        });
+    });
+    return () => {
+      controller.abort();
+    };
+  }, [organizationId, days, requestKey, refresh]);
   useEffect(() => {
     if (!organizationId) return;
     let active = true;
-    api
-      .dashboard(organizationId)
-      .then((data) => {
-        if (active) setDashboard({ state: "ready", data });
-      })
-      .catch((error: Error) => {
-        if (active) setDashboard({ state: "error", message: error.message });
-      });
-    api
-      .members(organizationId)
-      .then((data) => {
-        if (active) setMembers({ state: "ready", data });
-      })
-      .catch((error: Error) => {
-        if (active) setMembers({ state: "error", message: error.message });
-      });
+    void Promise.resolve().then(() => {
+      if (!active) return;
+      api
+        .members(organizationId)
+        .then((data) => {
+          if (active)
+            setMembers({ state: "ready", data, source: organizationId });
+        })
+        .catch((error: Error) => {
+          if (active)
+            setMembers({
+              state: "error",
+              message: error.message,
+              source: organizationId,
+            });
+        });
+    });
     return () => {
       active = false;
     };
-  }, [organizationId, refresh]);
-
+  }, [organizationId, memberRefresh]);
   useEffect(() => {
     const refreshVisibleWorkspace = () => {
       if (document.visibilityState === "visible") {
@@ -117,12 +227,21 @@ export function ApplicationShell({
     setDashboard({ state: "loading" });
     setMembers({ state: "loading" });
     setNotice("");
-    setView("overview");
+    openPath(resourcePath("overview"), id);
     setOrganizationId(id);
   }
-  function selectView(next: View) {
+  function openPath(path: string, targetOrganization = organizationId) {
+    const target = new URL(path, window.location.origin);
+    if (targetOrganization) target.searchParams.set("org", targetOrganization);
+    const destination = target.pathname + target.search;
+    const next = path.replace(/^\/app\/?/, "").split(/[?/]/)[0] || "overview";
     setView(next);
+    setRouteKey(destination);
     setMenuOpen(false);
+    navigate(destination);
+  }
+  function selectView(next: View) {
+    openPath(resourcePath(next));
   }
   async function invite(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -138,6 +257,7 @@ export function ApplicationShell({
       );
       setDialogOpen(false);
       setNotice("Invitation created.");
+      setMemberRefresh((value) => value + 1);
       setRefresh((value) => value + 1);
     } catch (error) {
       setInviteError(
@@ -158,7 +278,10 @@ export function ApplicationShell({
   }
   const data = dashboard.state === "ready" ? dashboard.data : null;
   return (
-    <div className="app-shell">
+    <div className={"app-shell" + (sidebarCollapsed ? " is-collapsed" : "")}>
+      <a className="skip-link" href="#main-content">
+        Skip to content
+      </a>
       <header className="app-header">
         <button
           className="menu-toggle"
@@ -170,10 +293,26 @@ export function ApplicationShell({
           <Icon name="menu" />
         </button>
         <div className="shell-brand">
-          <span className="shell-logo">A</span>
-          <strong>AI Employee</strong>
+          <span className="shell-logo">
+            <Icon name="sparkles" />
+          </span>
+          <span className="shell-brand-copy">
+            <strong>AI Employee</strong>
+            <small>Business workspace</small>
+          </span>
         </div>
         <div className="header-controls">
+          <WorkspaceSearch
+            key={organizationId + ":" + org?.role + ":search"}
+            organizationId={organizationId}
+            onNavigate={openPath}
+          />
+          <AssistantLauncher
+            key={organizationId + ":" + org?.role + ":assistant"}
+            organizationId={organizationId}
+            sourcePage={view}
+            onNavigate={openPath}
+          />
           <label className="organization-select">
             <span>Organization</span>
             <select
@@ -190,23 +329,41 @@ export function ApplicationShell({
           </label>
           <button
             className="notification-button"
-            aria-label={`Notifications${data ? `: ${data.notifications.length}` : ""}`}
+            aria-label={`Notifications${data ? `: ${data.unread_count ?? data.notifications.filter((item) => !item.read_at).length}` : ""}`}
             onClick={() => selectView("notifications")}
           >
             <Icon name="bell" />
-            {data && data.notifications.length > 0 && (
-              <span>{data.notifications.length}</span>
-            )}
+            {data &&
+              (data.unread_count ??
+                data.notifications.filter((item) => !item.read_at).length) >
+                0 && (
+                <span>
+                  {data.unread_count ??
+                    data.notifications.filter((item) => !item.read_at).length}
+                </span>
+              )}
           </button>
-          <div className="profile-info">
-            <span className="profile-avatar">
-              {session.user.full_name.charAt(0).toUpperCase()}
-            </span>
-            <span>
-              <strong>{session.user.full_name}</strong>
-              <small>{org?.role}</small>
-            </span>
-          </div>
+          <Dropdown
+            label="Open profile menu"
+            trigger={
+              <span className="profile-info">
+                <span className="profile-avatar">
+                  {session.user.full_name.charAt(0).toUpperCase()}
+                </span>
+                <span>
+                  <strong>{session.user.full_name}</strong>
+                  <small>{org?.role}</small>
+                </span>
+              </span>
+            }
+          >
+            <strong>{session.user.full_name}</strong>
+            <small>{session.user.email}</small>
+            <button onClick={() => selectView("settings")}>
+              Profile & security
+            </button>
+            <button onClick={() => void logout()}>Sign out</button>
+          </Dropdown>
           <Button
             className="desktop-signout"
             variant="secondary"
@@ -228,50 +385,54 @@ export function ApplicationShell({
           className={`shell-sidebar ${menuOpen ? "is-open" : ""}`}
           id="app-navigation"
         >
-          <p className="sidebar-label">Workspace</p>
+          <button
+            className="sidebar-collapse"
+            aria-label={
+              sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
+            }
+            aria-expanded={!sidebarCollapsed}
+            onClick={() => setSidebarCollapsed((value) => !value)}
+          >
+            <Icon name="panel" />
+            <span>Workspace navigation</span>
+          </button>
           <nav aria-label="Workspace navigation">
-            <button
-              className={view === "overview" ? "selected" : ""}
-              aria-current={view === "overview" ? "page" : undefined}
-              onClick={() => selectView("overview")}
-            >
-              <Icon name="grid" /> Overview
-            </button>
-            {canInvite && (
-              <button
-                className={view === "people" ? "selected" : ""}
-                aria-current={view === "people" ? "page" : undefined}
-                onClick={() => selectView("people")}
-              >
-                <Icon name="users" /> People & access
-              </button>
-            )}
-            <button
-              className={view === "agents" ? "selected" : ""}
-              aria-current={view === "agents" ? "page" : undefined}
-              onClick={() => selectView("agents")}
-            >
-              <Icon name="shield" /> AI employees
-            </button>
-            <button
-              className={view === "notifications" ? "selected" : ""}
-              aria-current={view === "notifications" ? "page" : undefined}
-              onClick={() => selectView("notifications")}
-            >
-              <Icon name="bell" /> Notifications
-            </button>
-            <button className={view === "crm" ? "selected" : ""} aria-current={view === "crm" ? "page" : undefined} onClick={() => selectView("crm")}><Icon name="users" /> CRM</button>
-            <button className={view === "inbound" ? "selected" : ""} aria-current={view === "inbound" ? "page" : undefined} onClick={() => selectView("inbound")}><Icon name="mail" /> Inbound chat</button>
-            <button
-              className={view === "knowledge" ? "selected" : ""}
-              aria-current={view === "knowledge" ? "page" : undefined}
-              onClick={() => selectView("knowledge")}
-            >
-              <Icon name="mail" /> Knowledge base
-            </button>
+            {["Workspace", "Customers", "Administration"].map((group) => {
+              const items = navigation.filter(
+                (item) =>
+                  item.group === group &&
+                  (!item.manage || canInvite) &&
+                  (!data?.configuration ||
+                    ["overview", "notifications", "settings"].includes(
+                      item.id,
+                    ) ||
+                    data.configuration.visible_modules.includes(item.id)),
+              );
+              return items.length ? (
+                <div className="nav-group" key={group}>
+                  <p className="sidebar-label">{group}</p>
+                  {items.map((item) => (
+                    <button
+                      key={item.id}
+                      title={item.label}
+                      aria-label={item.label}
+                      className={view === item.id ? "selected" : ""}
+                      aria-current={view === item.id ? "page" : undefined}
+                      onClick={() => selectView(item.id)}
+                    >
+                      <Icon name={item.icon} />
+                      <span>{item.label}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null;
+            })}
           </nav>
           <div className="sidebar-footer">
-            <span>Current workspace</span>
+            <span className="workspace-caption">
+              <span className="workspace-indicator" aria-hidden="true" />{" "}
+              Current workspace
+            </span>
             <strong>{org?.name ?? "No organization"}</strong>
             <div className="mobile-account">
               <span>{session.user.full_name}</span>
@@ -281,31 +442,59 @@ export function ApplicationShell({
             </div>
           </div>
         </aside>
-        <main className="shell-content">
+        <main className="shell-content" id="main-content" tabIndex={-1}>
+          <nav className="workspace-breadcrumbs" aria-label="Breadcrumb">
+            <button onClick={() => selectView("overview")}>Workspace</button>
+            <span aria-hidden="true">/</span>
+            <span aria-current="page">
+              {navigation.find((item) => item.id === view)?.label ??
+                "Page not found"}
+            </span>
+          </nav>
           <div className="shell-heading">
             <div>
               <p className="shell-eyebrow">{org?.name ?? "Workspace"}</p>
               <h1>
                 {view === "overview"
                   ? "Workspace overview"
-                  : view === "inbound" ? "Inbound chat" : view === "crm" ? "Customer relationships" : view === "knowledge"
-                    ? "Knowledge base"
-                    : view === "agents"
-                      ? "AI employees"
-                      : view === "people"
-                        ? "People & access"
-                        : "Notifications"}
+                  : view === "campaigns"
+                    ? "Marketing campaigns"
+                    : view === "messaging"
+                      ? "Messaging"
+                      : view === "inbound"
+                        ? "Inbound chat"
+                        : view === "crm"
+                          ? "Customer relationships"
+                          : view === "knowledge"
+                            ? "Knowledge base"
+                            : view === "agents"
+                              ? "AI employees"
+                              : view === "people"
+                                ? "People & access"
+                                : view === "settings"
+                                  ? "Account & workspace"
+                                  : "Notifications"}
               </h1>
               <p>
                 {view === "overview"
                   ? "A clear view of your organization’s activity."
-                  : view === "inbound" ? "Connect your website and help visitors." : view === "crm" ? "Manage your contacts, leads and deals." : view === "knowledge"
-                    ? "Manage the information your AI employees can use."
-                    : view === "agents"
-                      ? "Configure and test your AI workforce."
-                      : view === "people"
-                        ? "Manage the people in your workspace."
-                        : "Updates that need your attention."}
+                  : view === "campaigns"
+                    ? "Reach the right audience with reviewed, personalized campaigns."
+                    : view === "messaging"
+                      ? "Compose and track customer messages."
+                      : view === "inbound"
+                        ? "Connect your website and help visitors."
+                        : view === "crm"
+                          ? "Manage your contacts, leads and deals."
+                          : view === "knowledge"
+                            ? "Manage the information your AI employees can use."
+                            : view === "agents"
+                              ? "Configure and test your AI workforce."
+                              : view === "people"
+                                ? "Manage the people in your workspace."
+                                : view === "settings"
+                                  ? "Manage your profile, security and workspaces."
+                                  : "Updates that need your attention."}
               </p>
             </div>
             {canInvite && (view === "overview" || view === "people") && (
@@ -324,11 +513,23 @@ export function ApplicationShell({
               {notice}
             </div>
           )}
-          {!org ? (
-            <State>No organization is available for this account.</State>
-          ) : dashboard.state === "loading" ? (
-            <State>Loading workspace…</State>
-          ) : dashboard.state === "error" ? (
+          {view === "settings" ? (
+            <IdentitySettings
+              key={organizationId}
+              session={session}
+              setSession={setSession}
+              organizationId={organizationId}
+              members={members.state === "ready" ? members.data : []}
+              onOrganizationCreated={changeOrganization}
+            />
+          ) : !org ? (
+            <State>
+              No organization is available. Open Account & workspace to create a
+              workspace.
+            </State>
+          ) : view === "overview" && dashboard.state === "loading" ? (
+            <Skeleton label="Loading workspace..." />
+          ) : view === "overview" && dashboard.state === "error" ? (
             <State error>
               Unable to load workspace: {dashboard.message}{" "}
               <Button
@@ -343,69 +544,40 @@ export function ApplicationShell({
             </State>
           ) : (
             <>
-              {view === "overview" && (
-                <>
-                  <div className="summary-grid">
-                    <article className="summary-card">
-                      <span className="card-icon">
-                        <Icon name="users" />
-                      </span>
-                      <p>Team members</p>
-                      <strong>{dashboard.data.member_count}</strong>
-                      <small>People in this organization</small>
-                    </article>
-                    {canInvite && (
-                      <article className="summary-card">
-                        <span className="card-icon amber">
-                          <Icon name="mail" />
-                        </span>
-                        <p>Pending invitations</p>
-                        <strong>
-                          {dashboard.data.pending_invitation_count}
-                        </strong>
-                        <small>Awaiting acceptance</small>
-                      </article>
-                    )}
-                    <article className="summary-card">
-                      <span className="card-icon blue">
-                        <Icon name="shield" />
-                      </span>
-                      <p>Your role</p>
-                      <strong className="role-value">{org.role}</strong>
-                      <small>Access in this workspace</small>
-                    </article>
-                  </div>
-                  <section className="shell-card">
-                    <div className="card-heading">
-                      <div>
-                        <h2>Recent activity</h2>
-                        <p>Latest membership updates</p>
-                      </div>
-                    </div>
-                    <ActivityList
-                      items={dashboard.data.activity}
-                      empty="No activity yet."
-                    />
-                  </section>
-                </>
+              {["people", "campaigns", "messaging"].includes(view) &&
+                !canInvite && (
+                  <State error>
+                    Your current role does not allow this page. Choose another
+                    section.
+                  </State>
+                )}
+              {view === "not-found" && (
+                <State error>
+                  This page is not available.{" "}
+                  <Button onClick={() => selectView("overview")}>
+                    Return to overview
+                  </Button>
+                </State>
+              )}
+              {view === "overview" && dashboard.state === "ready" && (
+                <Dashboard
+                  data={dashboard.data}
+                  session={session}
+                  organizationId={organizationId}
+                  days={days}
+                  setDays={setDays}
+                  onRefresh={() => setRefresh((value) => value + 1)}
+                  onNavigate={openPath}
+                />
               )}
               {view === "notifications" && (
-                <section className="shell-card">
-                  <div className="card-heading">
-                    <div>
-                      <h2>Notifications</h2>
-                      <p>Pending invitations for this workspace</p>
-                    </div>
-                  </div>
-                  <ActivityList
-                    items={dashboard.data.notifications}
-                    empty={
-                      canInvite
-                        ? "No pending notifications."
-                        : "No notifications available."
-                    }
-                  />
-                </section>
+                <NotificationCenter
+                  key={organizationId + ":" + org?.role}
+                  organizationId={organizationId}
+                  session={session}
+                  onNavigate={openPath}
+                  onChanged={() => setRefresh((value) => value + 1)}
+                />
               )}
               {view === "people" && canInvite && (
                 <section className="shell-card">
@@ -428,6 +600,7 @@ export function ApplicationShell({
                           <th>Name</th>
                           <th>Email</th>
                           <th>Role</th>
+                          <th>Access</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -438,26 +611,77 @@ export function ApplicationShell({
                             <td>
                               <span className="shell-role">{member.role}</span>
                             </td>
+                            <td>
+                              {member.is_active === false
+                                ? "Inactive"
+                                : "Active"}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
                     </Table>
                   )}
+                  <TeamControls
+                    key={organizationId + ":" + org?.role}
+                    session={session}
+                    organizationId={organizationId}
+                    members={members.state === "ready" ? members.data : []}
+                    onChanged={() => {
+                      setRefresh((value) => value + 1);
+                      setMemberRefresh((value) => value + 1);
+                      void api
+                        .session()
+                        .then(setSession)
+                        .catch(() => setSession(null));
+                    }}
+                  />
                 </section>
               )}
               {view === "agents" && (
                 <Agents
-                  key={organizationId}
+                  key={organizationId + ":" + org?.role + ":" + routeKey}
                   organizationId={organizationId}
                   session={session}
                   canManage={!!canInvite}
                 />
               )}
-              {view === "crm" && <CRM key={organizationId} organizationId={organizationId} session={session} canManage={canInvite} members={members.state === "ready" ? members.data : []} />}
-              {view === "inbound" && <Inbound key={organizationId} organizationId={organizationId} session={session} canManage={canInvite} members={members.state === "ready" ? members.data : []} />}
+              {view === "crm" && (
+                <CRM
+                  key={organizationId + ":" + org?.role + ":" + routeKey}
+                  organizationId={organizationId}
+                  session={session}
+                  canManage={canInvite}
+                  members={members.state === "ready" ? members.data : []}
+                />
+              )}
+              {view === "inbound" && (
+                <Inbound
+                  key={organizationId + ":" + org?.role + ":" + routeKey}
+                  organizationId={organizationId}
+                  session={session}
+                  canManage={canInvite}
+                  members={members.state === "ready" ? members.data : []}
+                />
+              )}
+              {view === "campaigns" && canInvite && (
+                <Campaigns
+                  key={organizationId + ":" + org?.role + ":" + routeKey}
+                  organizationId={organizationId}
+                  session={session}
+                  canManage={canInvite}
+                  members={members.state === "ready" ? members.data : []}
+                />
+              )}
+              {view === "messaging" && canInvite && (
+                <Messaging
+                  key={organizationId + ":" + org?.role + ":" + routeKey}
+                  organizationId={organizationId}
+                  session={session}
+                />
+              )}
               {view === "knowledge" && (
                 <Knowledge
-                  key={organizationId}
+                  key={organizationId + ":" + org?.role + ":" + routeKey}
                   organizationId={organizationId}
                   session={session}
                   canManage={!!canInvite}

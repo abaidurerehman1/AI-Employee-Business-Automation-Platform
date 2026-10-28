@@ -7,11 +7,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Index,
     LargeBinary,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,7 +38,8 @@ class KnowledgeDocument(Base):
 
 class KnowledgeChunk(Base):
     __tablename__ = "knowledge_chunks"
-    __table_args__ = (UniqueConstraint("document_id", "chunk_index"),)
+    __table_args__ = (UniqueConstraint("document_id", "chunk_index"),
+        Index("ix_knowledge_chunks_search", text("to_tsvector('simple', content)"), postgresql_using="gin").ddl_if(dialect="postgresql"))
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("knowledge_documents.id", ondelete="CASCADE"), index=True

@@ -2,6 +2,9 @@
 
 Phase 1 foundation for a multi-tenant AI workforce SaaS platform.
 
+Audit reports: [Foundation](FOUNDATION.md), [Identity and tenant security](IDENTITY.md),
+and [Central dashboard and UI](DASHBOARD.md).
+
 ## Stack
 
 - React, TypeScript, and Vite
@@ -13,7 +16,9 @@ Phase 1 foundation for a multi-tenant AI workforce SaaS platform.
 ## Quick start
 
 1. Copy `.env.example` to `.env`.
-2. Replace `POSTGRES_PASSWORD` with a local development password.
+2. Copy `backend/.env.example` to `backend/.env`, then replace `POSTGRES_PASSWORD`
+   in the root `.env` with a local development password. Keep the backend's local
+   `DATABASE_URL` consistent if you also run Python outside Docker.
 3. Start the stack:
 
    ```bash
@@ -24,12 +29,16 @@ Phase 1 foundation for a multi-tenant AI workforce SaaS platform.
 5. Open API documentation at <http://localhost:8000/docs>.
 
 The backend container applies Alembic migrations before starting the API. The
-dashboard calls `GET /api/v1/health`, which verifies the API, PostgreSQL, and
-Redis connections.
+`GET /api/v1/health` verifies PostgreSQL and Redis. `/api/v1/live` checks the API
+process; `/api/v1/ready` also verifies migration head, pgvector and Temporal.
+Dependency/readiness failures return HTTP 503 instead of a misleading success.
 
 ## Authentication and organizations
 
 Phase 2 provides secure multi-tenant identity and access management:
+
+The current account, organization and authorization audit is documented in
+[IDENTITY.md](IDENTITY.md), including migration `0015`, permission grants and test commands.
 
 - Registration creates a user, organization, and Admin membership.
 - Email verification is required before login.
@@ -85,7 +94,7 @@ Frontend:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -134,3 +143,51 @@ optional `budget` and `timeline`. Send `X-Timestamp` as Unix seconds and
 Requests older than five minutes are rejected; event IDs are deduplicated per site.
 Keep the webhook secret private. It is stored in the application database, so
 protect database access and backups accordingly.
+
+## Messaging setup
+
+The Messaging screen lets workspace managers save templates, preview messages,
+queue individual emails or SMS messages, and manage suppression lists. The
+configured sender is shared by the installation. Set `RESEND_API_KEY` and
+`RESEND_FROM_EMAIL` in `backend/.env`; the sender domain must be verified in
+Resend. `RESEND_REPLY_TO` is optional. Set `MESSAGING_PUBLIC_BASE_URL` to the
+public HTTPS API origin and `MESSAGING_UNSUBSCRIBE_SECRET` to a long random secret
+before sending email. Without these settings, email fails closed. Point Resend's
+signed webhook at `/api/v1/messaging/webhooks/resend` and set
+`RESEND_WEBHOOK_SECRET` from the provider dashboard. Email replies sent directly
+to a Gmail reply-to address remain in Gmail; use a Resend receiving address and
+webhook to bring replies into this application.
+
+To enable SMS later, configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and
+`TWILIO_FROM_NUMBER`. Configure the Twilio incoming-message webhook to
+`/api/v1/messaging/webhooks/twilio/{organization_id}` on the public API origin.
+The same endpoint accepts delivery callbacks and opt-out replies. Use a webhook
+configuration that routes messages to the correct organization. The application
+does not automatically retry uncertain provider outcomes; check those in the
+provider dashboard before taking further action. The default hourly queue limit
+is 100 messages per organization and can be changed with `MESSAGING_HOURLY_LIMIT`.
+
+For Gmail, enable the Gmail API in Google Cloud and add the exact
+`GOOGLE_REDIRECT_URI` value (locally,
+`http://localhost:8000/api/v1/messaging/gmail/callback`) to the OAuth client's
+authorized redirect URIs. Add `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and a
+stable Fernet `OAUTH_ENCRYPTION_KEY` to `backend/.env`, restart the services,
+then select **Messaging → Connect Gmail** and authorize the intended account.
+If the OAuth app is in testing mode, add the account as a test user. The Gmail
+connection is scoped to the workspace and takes precedence over Resend for that
+workspace. Refresh tokens are encrypted with `OAUTH_ENCRYPTION_KEY`; back up that
+key securely because changing or losing it requires users to reconnect. Gmail
+also needs the public unsubscribe URL described above. For local testing only,
+`MESSAGING_PUBLIC_BASE_URL=http://localhost:8000` permits sending solely to the
+connected Gmail address; other recipients require a publicly reachable HTTPS URL.
+Delivery is accepted by
+Gmail but final delivery status and Gmail replies are not synchronized by this
+connection. Revoking account permissions in Google is separate from disconnecting
+the workspace in this app.
+
+## Marketing campaigns
+
+Phase 10 setup, verification, provider limitations and operator instructions: [CAMPAIGNS.md](CAMPAIGNS.md).
+
+Foundation architecture, environment separation, audit results and verification:
+[FOUNDATION.md](FOUNDATION.md).

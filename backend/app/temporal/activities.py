@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 async def execute_crm_write(sessions, request_id: uuid.UUID) -> str:
     # The mutation and stored result commit together under the request lock.
     # An activity retry therefore returns the original result without repeating it.
-    from app.api.routes.crm import validate
+    from app.api.routes.crm import validate, validate_links
 
     async with sessions() as db:
         request = await db.scalar(select(AgentToolRequest).where(
@@ -33,7 +33,7 @@ async def execute_crm_write(sessions, request_id: uuid.UUID) -> str:
             return request.result
         membership = await db.scalar(select(Membership).join(User, User.id == Membership.user_id).where(
             Membership.organization_id == request.organization_id,
-            Membership.user_id == request.requested_by, User.is_active.is_(True)))
+            Membership.user_id == request.requested_by, Membership.is_active.is_(True), User.is_active.is_(True)))
         version = await db.get(AgentVersion, request.version_id)
         if not membership or membership.role not in {MembershipRole.admin, MembershipRole.manager}:
             raise ValueError("CRM changes require a current manager or administrator")
@@ -51,6 +51,7 @@ async def execute_crm_write(sessions, request_id: uuid.UUID) -> str:
         }[entity]
         if request.tool_name.startswith("create_"):
             data = validate(kind, args)
+            await validate_links(db, request.organization_id, data)
             record = model(organization_id=request.organization_id, **data)
             db.add(record)
             await db.flush()
@@ -63,6 +64,7 @@ async def execute_crm_write(sessions, request_id: uuid.UUID) -> str:
             data = {field: getattr(record, field) for field in fields}
             data.update({key: value for key, value in args.items() if value is not None})
             data = validate(kind, data)
+            await validate_links(db, request.organization_id, data)
             for field, value in data.items():
                 setattr(record, field, value)
             await db.flush()
@@ -110,6 +112,25 @@ async def execute_agent_tool(payload: dict[str, Any]) -> str:
             requested_by = request.requested_by
             version_id = request.version_id
 
+            member = await db.scalar(select(Membership).join(User, User.id == Membership.user_id).where(
+                Membership.organization_id == organization_id, Membership.user_id == requested_by,
+                Membership.is_active.is_(True), User.is_active.is_(True)))
+            if not member:
+                request.status = "failed"
+                request.error_message = "Workspace access has been revoked."
+                await db.commit()
+                raise ApplicationError("Workspace access has been revoked", non_retryable=True)
+            if request.decided_by:
+                approver = await db.scalar(select(Membership).join(User, User.id == Membership.user_id).where(
+                    Membership.organization_id == organization_id, Membership.user_id == request.decided_by,
+                    Membership.is_active.is_(True), User.is_active.is_(True),
+                    Membership.role.in_([MembershipRole.admin, MembershipRole.manager])))
+                if not approver:
+                    request.status = "failed"
+                    request.error_message = "Approval authority has been revoked."
+                    await db.commit()
+                    raise ApplicationError("Approval authority has been revoked", non_retryable=True)
+
         try:
             if tool_name in CRM_WRITE_TOOLS:
                 return await execute_crm_write(sessions, request_id)
@@ -117,7 +138,7 @@ async def execute_agent_tool(payload: dict[str, Any]) -> str:
                 validated = validate_tool_arguments(tool_name, json.dumps(arguments))
                 async with sessions() as db:
                     member = await db.scalar(select(Membership.id).where(
-                        Membership.organization_id == organization_id, Membership.user_id == requested_by))
+                        Membership.organization_id == organization_id, Membership.user_id == requested_by, Membership.is_active.is_(True)))
                     version = await db.get(AgentVersion, version_id)
                     if not member or not version or tool_name not in version.tools:
                         raise ValueError("CRM access is no longer permitted")
@@ -174,6 +195,12 @@ async def resume_agent_conversation(request_id: str) -> str | None:
             request = await db.get(AgentToolRequest, uuid.UUID(request_id))
             if not request or not request.conversation_id:
                 return None
+            member = await db.scalar(select(Membership.id).join(User, User.id == Membership.user_id).where(
+                Membership.organization_id == request.organization_id,
+                Membership.user_id == request.requested_by,
+                Membership.is_active.is_(True), User.is_active.is_(True)))
+            if not member:
+                raise ApplicationError("Workspace access has been revoked", non_retryable=True)
             existing = await db.scalar(
                 select(AgentMessage).where(
                     AgentMessage.source_tool_request_id == request.id

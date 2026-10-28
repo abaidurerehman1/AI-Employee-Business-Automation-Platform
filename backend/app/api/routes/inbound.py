@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from app.api.dependencies import DbSession, TenantContext, get_tenant_context, require_csrf, require_roles
+from app.api.dependencies import DbSession, TenantContext, require_csrf, require_permission
 from app.core.embeddings import EmbeddingError
 from app.core.inbound_rate import check_rate_limit
 from app.core.openai_client import ProviderError
@@ -24,8 +24,8 @@ from app.models.inbound import InboundSite, InboundWebhookEvent, VisitorConversa
 from app.models.knowledge import KnowledgeDocument
 
 router = APIRouter(tags=["inbound"])
-Tenant = Annotated[TenantContext, Depends(get_tenant_context)]
-Manager = Annotated[TenantContext, Depends(require_roles(MembershipRole.admin, MembershipRole.manager))]
+Tenant = Annotated[TenantContext, Depends(require_permission("inbox.assigned"))]
+Manager = Annotated[TenantContext, Depends(require_permission("inbox.manage"))]
 Csrf = Annotated[User, Depends(require_csrf)]
 
 
@@ -144,8 +144,10 @@ async def configure_site(payload: SiteInput, db: DbSession, context: Manager, _u
 
 @router.get("/inbound/conversations")
 async def list_inbound(db: DbSession, context: Tenant):
-    rows = (await db.scalars(select(VisitorConversation).where(
-        VisitorConversation.organization_id == context.organization.id).order_by(VisitorConversation.created_at.desc()).limit(100))).all()
+    query = select(VisitorConversation).where(VisitorConversation.organization_id == context.organization.id)
+    if context.membership.role == MembershipRole.employee:
+        query = query.where(VisitorConversation.assigned_to == context.user.id)
+    rows = (await db.scalars(query.order_by(VisitorConversation.created_at.desc()).limit(100))).all()
     return [{"id": item.id, "name": item.visitor_name, "email": item.visitor_email,
              "status": item.status, "assigned_to": item.assigned_to, "lead_id": item.lead_id,
              "context": item.context, "created_at": item.created_at} for item in rows]
@@ -162,6 +164,8 @@ async def staff_conversation(db, org_id, conversation_id):
 @router.get("/inbound/conversations/{conversation_id}")
 async def read_inbound(conversation_id: uuid.UUID, db: DbSession, context: Tenant):
     conversation = await staff_conversation(db, context.organization.id, conversation_id)
+    if context.membership.role == MembershipRole.employee and conversation.assigned_to != context.user.id:
+        raise HTTPException(404, "Conversation not found")
     messages = (await db.scalars(select(VisitorMessage).where(VisitorMessage.conversation_id == conversation.id).order_by(VisitorMessage.created_at, VisitorMessage.id))).all()
     return {"status": conversation.status, "assigned_to": conversation.assigned_to, "context": conversation.context,
             "messages": [render_message(item) for item in messages]}
@@ -172,7 +176,7 @@ async def assign_inbound(conversation_id: uuid.UUID, payload: AssignmentInput, d
     conversation = await staff_conversation(db, context.organization.id, conversation_id)
     if payload.assigned_to:
         member = await db.scalar(select(Membership.id).join(User, User.id == Membership.user_id).where(
-            Membership.organization_id == context.organization.id, Membership.user_id == payload.assigned_to, User.is_active.is_(True)))
+            Membership.organization_id == context.organization.id, Membership.user_id == payload.assigned_to, Membership.is_active.is_(True), User.is_active.is_(True)))
         if not member:
             raise HTTPException(400, "Assigned person must be an active member")
     conversation.assigned_to = payload.assigned_to

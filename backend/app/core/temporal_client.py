@@ -13,12 +13,26 @@ class TemporalUnavailable(Exception):
     pass
 
 
+async def start_campaign_workflow(workflow_id: str, payload: dict) -> None:
+    from app.temporal.campaigns import CampaignWorkflow
+    from temporalio.common import WorkflowIDReusePolicy
+    client = await _connect()
+    try:
+        await client.start_workflow(CampaignWorkflow.run, payload, id=workflow_id,
+            task_queue=settings.temporal_task_queue, id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE)
+    except Exception as exc:
+        raise TemporalUnavailable("Unable to start campaign; retry Start to reconcile the same workflow ID") from exc
+
+
 async def _connect() -> Client:
     try:
         return await asyncio.wait_for(
             Client.connect(
                 settings.temporal_address,
                 namespace=settings.temporal_namespace,
+                tls=settings.temporal_tls,
+                api_key=settings.temporal_api_key or None,
             ),
             timeout=5,
         )

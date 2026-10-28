@@ -143,7 +143,8 @@ async def test_saved_decision_recovers_without_signal(decision):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.getenv("RUN_LIVE_TEMPORAL") != "1", reason="Live Temporal test is opt-in")
-async def test_real_worker_recovers_approval_from_database():
+@pytest.mark.parametrize("authority", ["active", "membership_disabled", "approver_demoted"])
+async def test_real_worker_recovers_approval_from_database(authority):
     engine = create_async_engine(settings.database_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     user_id, org_id, agent_id, version_id, request_id = (uuid4() for _ in range(5))
@@ -155,6 +156,7 @@ async def test_real_worker_recovers_approval_from_database():
                 Organization(id=org_id, name="Workflow test", slug=f"workflow-{org_id}"),
             ])
             await db.flush()
+            db.add(Membership(user_id=user_id, organization_id=org_id, role=MembershipRole.employee if authority == "approver_demoted" else MembershipRole.admin, is_active=authority != "membership_disabled"))
             db.add(Agent(id=agent_id, organization_id=org_id, name="Test", status="draft"))
             await db.flush()
             db.add(AgentVersion(id=version_id, agent_id=agent_id, version=1, role="Test", instructions="Test", tone="neutral", language="English", model="test", tools=["get_current_utc_time"], approval_rules={"get_current_utc_time": True}))
@@ -163,6 +165,14 @@ async def test_real_worker_recovers_approval_from_database():
             await db.commit()
         await start_tool_workflow(workflow_id, {"request_id": str(request_id), "tool_name": "get_current_utc_time", "arguments": {}, "requires_approval": True})
         client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        if authority != "active":
+            from temporalio.client import WorkflowFailureError
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(client.get_workflow_handle(workflow_id).result(), timeout=30)
+            async with sessions() as db:
+                request = await db.get(AgentToolRequest, request_id)
+                assert request.status == "failed" and request.result is None
+            return
         result = await asyncio.wait_for(client.get_workflow_handle(workflow_id).result(), timeout=30)
         assert result["status"] == "completed"
         async with sessions() as db:

@@ -10,22 +10,21 @@ from sqlalchemy import delete, select
 from app.api.dependencies import (
     DbSession,
     TenantContext,
-    get_tenant_context,
     require_csrf,
-    require_roles,
+    require_permission,
 )
 from app.core.config import settings
 from app.core.embeddings import EmbeddingError
 from app.core.retrieval import hybrid_search
-from app.models.auth import MembershipRole, User
+from app.models.auth import User
 from app.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from app.worker import process_document_task
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 Manager = Annotated[
-    TenantContext, Depends(require_roles(MembershipRole.admin, MembershipRole.manager))
+    TenantContext, Depends(require_permission("knowledge.manage"))
 ]
-Tenant = Annotated[TenantContext, Depends(get_tenant_context)]
+Tenant = Annotated[TenantContext, Depends(require_permission("knowledge.read"))]
 CsrfUser = Annotated[User, Depends(require_csrf)]
 
 

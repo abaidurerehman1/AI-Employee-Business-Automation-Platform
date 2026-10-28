@@ -1,0 +1,65 @@
+# Standalone production application services. Supply existing managed/private
+# PostgreSQL+pgvector, Redis and Temporal; this file never launches start-dev.
+# Validate only: docker compose -f compose.production.yaml config --quiet
+x-runtime: &runtime
+  APP_ENV: production
+  DATABASE_URL: ${PRODUCTION_DATABASE_URL:?Set PRODUCTION_DATABASE_URL}
+  REDIS_URL: ${PRODUCTION_REDIS_URL:?Set PRODUCTION_REDIS_URL}
+  TEMPORAL_ADDRESS: ${PRODUCTION_TEMPORAL_ADDRESS:?Set PRODUCTION_TEMPORAL_ADDRESS}
+  FRONTEND_URL: ${PUBLIC_FRONTEND_URL:?Set PUBLIC_FRONTEND_URL}
+  CORS_ORIGINS: ${PRODUCTION_CORS_ORIGINS:?Set explicit HTTPS origins as a JSON array}
+  ALLOWED_HOSTS: ${PRODUCTION_ALLOWED_HOSTS:?Set host names as a JSON array}
+  SECURE_COOKIES: "true"
+  CAMPAIGN_ALLOW_LOCAL_GMAIL_SELF_TEST: "false"
+  RUN_MIGRATIONS_ON_START: "false"
+
+services:
+  backend:
+    build: ./backend
+    env_file: ${PRODUCTION_BACKEND_ENV_FILE:-./backend/.env.production}
+    environment: *runtime
+    ports: ["127.0.0.1:8000:8000"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/ready', timeout=8)"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+  worker:
+    build: ./backend
+    env_file: ${PRODUCTION_BACKEND_ENV_FILE:-./backend/.env.production}
+    environment: *runtime
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--beat", "--schedule=/tmp/celerybeat-schedule", "--loglevel=info", "--concurrency=2"]
+    restart: unless-stopped
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 3 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  temporal-worker:
+    build: ./backend
+    env_file: ${PRODUCTION_BACKEND_ENV_FILE:-./backend/.env.production}
+    environment: *runtime
+    command: ["python", "-m", "app.temporal_worker"]
+    restart: unless-stopped
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.core.worker_health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${PUBLIC_API_URL:?Set the HTTPS API URL including /api/v1}
+    ports: ["127.0.0.1:8080:80"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
